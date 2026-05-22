@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from config import TRANSCRIPTS_DIR, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_MODEL
 
@@ -26,13 +26,11 @@ def get_transcript(youtube_id: str, title: str) -> str | None:
 
 def _try_captions(youtube_id: str) -> str | None:
     try:
-        entries = YouTubeTranscriptApi.get_transcript(youtube_id)
-        return " ".join(e["text"] for e in entries)
-    except (TranscriptsDisabled, NoTranscriptFound):
-        logger.info(f"No captions for {youtube_id} — trying Whisper")
-        return None
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(youtube_id)
+        return " ".join(entry.text for entry in transcript)
     except Exception as e:
-        logger.warning(f"Caption fetch error for {youtube_id}: {e}")
+        logger.info(f"No captions for {youtube_id} — trying Whisper ({e})")
         return None
 
 

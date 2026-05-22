@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from database import (
     get_videos_for_retrospective,
-    add_draft,
+    add_draft_pair,
     mark_retrospective_reviewed,
     count_good_posts,
 )
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 MIN_GOOD_POSTS = 5
 
 
-async def run_retrospective(send_draft_fn) -> int:
+async def run_retrospective(send_pair_fn) -> int:
     """Re-mine archived transcripts using current approved posts as style examples.
 
-    send_draft_fn signature:
-        async (draft_id, video_title, fmt, content, is_retrospective=True) -> None
+    send_pair_fn signature:
+        async (id_a, id_b, video_title, idea, is_retrospective=True) -> None
     """
     n_good = count_good_posts()
     if n_good < MIN_GOOD_POSTS:
@@ -42,28 +42,30 @@ async def run_retrospective(send_draft_fn) -> int:
         transcript = Path(transcript_path).read_text(encoding="utf-8")
 
         try:
-            posts = generate_posts(video["youtube_id"], video["title"], transcript)
+            ideas = generate_posts(video["youtube_id"], video["title"], transcript)
         except Exception as e:
             logger.error(f"Generation failed for {video['youtube_id']}: {e}")
             continue
 
-        for post in posts:
-            content_str = (
-                post["content"]
-                if isinstance(post["content"], str)
-                else json.dumps(post["content"])
+        for idea in ideas:
+            original_str = (
+                idea["original"] if isinstance(idea["original"], str)
+                else json.dumps(idea["original"])
             )
-            draft_id = add_draft(video["id"], post["format"], content_str)
-            await send_draft_fn(
-                draft_id,
-                video["title"],
-                post["format"],
-                post["content"],
-                is_retrospective=True,
+            trend_str = (
+                idea["trend"] if isinstance(idea["trend"], str)
+                else json.dumps(idea["trend"])
+            )
+            id_a, id_b = add_draft_pair(
+                video["id"], idea["format"],
+                original_str, trend_str, idea.get("trend_reason", "")
+            )
+            await send_pair_fn(
+                id_a, id_b, video["title"], idea, is_retrospective=True
             )
             total += 1
 
         mark_retrospective_reviewed(video["id"])
-        logger.info(f"Retrospective: {len(posts)} drafts from '{video['title']}'")
+        logger.info(f"Retrospective: {len(ideas)} idea pairs from '{video['title']}'")
 
     return total

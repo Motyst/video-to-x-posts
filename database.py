@@ -28,6 +28,8 @@ def init_db():
                 content             TEXT NOT NULL,
                 status              TEXT DEFAULT 'pending',
                 telegram_message_id INTEGER,
+                scheduled_for       TEXT,
+                posted_url          TEXT,
                 created_at          TEXT DEFAULT (datetime('now')),
                 updated_at          TEXT DEFAULT (datetime('now'))
             );
@@ -40,6 +42,23 @@ def init_db():
                 approved_at TEXT DEFAULT (datetime('now'))
             );
         """)
+    _migrate()
+
+
+def _migrate():
+    """Add columns introduced after initial schema."""
+    with _connect() as conn:
+        for col, definition in [
+            ("scheduled_for", "TEXT"),
+            ("posted_url",    "TEXT"),
+            ("version",       "TEXT"),      # 'original' | 'trend' | NULL (legacy)
+            ("pair_id",       "INTEGER"),   # links original+trend drafts together
+            ("trend_reason",  "TEXT"),      # Claude's explanation for trend version
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE drafts ADD COLUMN {col} {definition}")
+            except Exception:
+                pass  # column already exists
 
 
 # ── videos ────────────────────────────────────────────────────────────────────
@@ -93,6 +112,43 @@ def add_draft(video_id: int, fmt: str, content: str) -> int:
             (video_id, fmt, content),
         )
         return cur.lastrowid
+
+
+def add_draft_pair(
+    video_id: int,
+    fmt: str,
+    original_content: str,
+    trend_content: str,
+    trend_reason: str,
+) -> tuple[int, int]:
+    """Insert original + trend versions as a linked pair. Returns (id_a, id_b)."""
+    with _connect() as conn:
+        cur_a = conn.execute(
+            "INSERT INTO drafts (video_id, format, content, version) VALUES (?,?,?,?)",
+            (video_id, fmt, original_content, "original"),
+        )
+        id_a = cur_a.lastrowid
+        cur_b = conn.execute(
+            "INSERT INTO drafts (video_id, format, content, version, trend_reason, pair_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (video_id, fmt, trend_content, "trend", trend_reason, id_a),
+        )
+        id_b = cur_b.lastrowid
+        conn.execute("UPDATE drafts SET pair_id=? WHERE id=?", (id_a, id_a))
+        return id_a, id_b
+
+
+def get_draft_partner(draft_id: int) -> dict | None:
+    """Return the paired draft (other version) for a given draft_id."""
+    draft = get_draft_by_id(draft_id)
+    if not draft or not draft.get("pair_id"):
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM drafts WHERE pair_id=? AND id!=?",
+            (draft["pair_id"], draft_id),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def get_draft_by_id(draft_id: int) -> dict | None:
@@ -160,12 +216,35 @@ def get_approved_drafts() -> list:
         return [dict(r) for r in rows]
 
 
-def mark_draft_posted(draft_id: int):
+def mark_draft_posted(draft_id: int, posted_url: str = None):
     with _connect() as conn:
         conn.execute(
-            "UPDATE drafts SET status='posted', updated_at=datetime('now') WHERE id=?",
-            (draft_id,),
+            "UPDATE drafts SET status='posted', posted_url=?, updated_at=datetime('now') WHERE id=?",
+            (posted_url, draft_id),
         )
+
+
+def set_draft_scheduled(draft_id: int, scheduled_for: str):
+    """Mark draft as scheduled with ISO UTC datetime string."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE drafts SET status='scheduled', scheduled_for=?, updated_at=datetime('now') WHERE id=?",
+            (scheduled_for, draft_id),
+        )
+
+
+def get_scheduled_drafts() -> list:
+    """All scheduled drafts whose time has arrived."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT d.id, d.format, d.content, d.scheduled_for, v.title
+            FROM   drafts d
+            JOIN   videos v ON v.id = d.video_id
+            WHERE  d.status = 'scheduled'
+            AND    d.scheduled_for <= datetime('now')
+            ORDER  BY d.scheduled_for ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
 
 
 def upsert_video(youtube_id: str, title: str, url: str, transcript_path: str = None) -> int:
