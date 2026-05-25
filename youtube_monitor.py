@@ -26,6 +26,7 @@ def fetch_channel_videos(channel_url: str) -> list:
                 "youtube_id": vid_id,
                 "title": entry.get("title", ""),
                 "url": f"https://www.youtube.com/watch?v={vid_id}",
+                "duration_seconds": entry.get("duration"),
             })
     return videos
 
@@ -61,4 +62,5 @@ def fetch_single_video(url: str) -> dict | None:
         "youtube_id": vid_id,
         "title": info.get("title", ""),
         "url": f"https://www.youtube.com/watch?v={vid_id}",
+        "duration_seconds": info.get("duration"),
     }

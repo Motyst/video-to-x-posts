@@ -41,6 +41,14 @@ def init_db():
                 content     TEXT NOT NULL,
                 approved_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS video_jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id    INTEGER REFERENCES videos(id),
+                job_type    TEXT NOT NULL,
+                ran_at      TEXT DEFAULT (datetime('now')),
+                draft_count INTEGER DEFAULT 0
+            );
         """)
     _migrate()
 
@@ -49,14 +57,23 @@ def _migrate():
     """Add columns introduced after initial schema."""
     with _connect() as conn:
         for col, definition in [
-            ("scheduled_for", "TEXT"),
-            ("posted_url",    "TEXT"),
-            ("version",       "TEXT"),      # 'original' | 'trend' | NULL (legacy)
-            ("pair_id",       "INTEGER"),   # links original+trend drafts together
-            ("trend_reason",  "TEXT"),      # Claude's explanation for trend version
+            ("scheduled_for",    "TEXT"),
+            ("posted_url",       "TEXT"),
+            ("version",          "TEXT"),      # 'original' | 'trend' | NULL (legacy)
+            ("pair_id",          "INTEGER"),   # links original+trend drafts together
+            ("trend_reason",     "TEXT"),      # Claude's explanation for trend version
         ]:
             try:
                 conn.execute(f"ALTER TABLE drafts ADD COLUMN {col} {definition}")
+            except Exception:
+                pass
+
+        for col, definition in [
+            ("source",           "TEXT"),      # 'youtube' | 'local'
+            ("duration_seconds", "INTEGER"),   # video length in seconds
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {definition}")
             except Exception:
                 pass  # column already exists
 
@@ -247,18 +264,65 @@ def get_scheduled_drafts() -> list:
         return [dict(r) for r in rows]
 
 
-def upsert_video(youtube_id: str, title: str, url: str, transcript_path: str = None) -> int:
+# ── video_jobs ────────────────────────────────────────────────────────────────
+
+def log_video_job(video_id: int, job_type: str, draft_count: int = 0):
+    """Record that a content generation job was run for a video."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO video_jobs (video_id, job_type, draft_count) VALUES (?,?,?)",
+            (video_id, job_type, draft_count),
+        )
+
+
+def get_video_jobs(video_id: int) -> list:
+    """All jobs run for a specific video, newest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT job_type, ran_at, draft_count FROM video_jobs WHERE video_id=? ORDER BY ran_at DESC",
+            (video_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_recent_video_summaries(limit: int = 10) -> list:
+    """Recent videos with aggregated job history — for /status overview."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT v.id, v.title, v.processed_at, v.source, v.duration_seconds,
+                   GROUP_CONCAT(vj.job_type, ',') AS jobs_run
+            FROM   videos v
+            LEFT   JOIN video_jobs vj ON vj.video_id = v.id
+            GROUP  BY v.id
+            ORDER  BY v.processed_at DESC
+            LIMIT  ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── videos ────────────────────────────────────────────────────────────────────
+
+def upsert_video(
+    youtube_id: str,
+    title: str,
+    url: str,
+    transcript_path: str = None,
+    source: str = None,
+    duration_seconds: int = None,
+) -> int:
     """Insert or update a video row (used when re-processing an existing video)."""
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO videos (youtube_id, title, url, transcript_path)
-               VALUES (?,?,?,?)
+            """INSERT INTO videos (youtube_id, title, url, transcript_path, source, duration_seconds)
+               VALUES (?,?,?,?,?,?)
                ON CONFLICT(youtube_id) DO UPDATE SET
                    title=excluded.title,
                    transcript_path=COALESCE(excluded.transcript_path, transcript_path),
+                   source=COALESCE(excluded.source, source),
+                   duration_seconds=COALESCE(excluded.duration_seconds, duration_seconds),
                    processed_at=datetime('now')
             """,
-            (youtube_id, title, url, transcript_path),
+            (youtube_id, title, url, transcript_path, source, duration_seconds),
         )
         return conn.execute(
             "SELECT id FROM videos WHERE youtube_id=?", (youtube_id,)

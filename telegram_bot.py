@@ -33,8 +33,10 @@ from database import (
     get_draft_by_id,
     get_draft_partner,
     get_processed_video_ids,
+    get_recent_video_summaries,
     get_scheduled_drafts,
     init_db,
+    log_video_job,
     mark_draft_posted,
     set_draft_scheduled,
     set_draft_telegram_id,
@@ -44,7 +46,7 @@ from database import (
 from twitter_poster import post_draft, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
-from content_generator import generate_posts
+from content_generator import generate_posts, generate_promo
 from retrospective import run_retrospective
 
 logging.basicConfig(
@@ -242,6 +244,53 @@ async def send_idea_pair(
             set_draft_telegram_id(id_b, msg_b.message_id)
         except Exception as e:
             logger.error(f"Failed to send thread version B ({id_b}): {e}")
+
+
+async def send_promo_pair(
+    app: Application,
+    id_a: int,
+    id_b: int,
+    video_title: str,
+    promo: dict,
+    is_retro: bool = False,
+):
+    """Send promotional content (title/hook/caption) as two version messages."""
+    tag = "🔄 [RETRO] " if is_retro else ""
+    reason = promo.get("trend_reason", "")
+
+    text_a = (
+        f"{tag}From: {video_title}\n\n"
+        f"━━ VERSION A: Original ━━\n\n"
+        f"📌 Title:\n{promo['title_a']}\n\n"
+        f"🪝 Hook:\n{promo['hook_a']}\n\n"
+        f"📝 Caption:\n{promo['caption_a']}"
+    )
+    text_b = (
+        f"{tag}From: {video_title}\n\n"
+        f"━━ VERSION B: Trend angle ━━\n\n"
+        f"📌 Title:\n{promo['title_b']}\n\n"
+        f"🪝 Hook:\n{promo['hook_b']}\n\n"
+        f"📝 Caption:\n{promo['caption_b']}\n\n"
+        f"💡 {reason}"
+    )
+    try:
+        msg_a = await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text_a[:4096],
+            reply_markup=_pair_version_a_keyboard(id_a),
+        )
+        set_draft_telegram_id(id_a, msg_a.message_id)
+    except Exception as e:
+        logger.error(f"Failed to send promo version A ({id_a}): {e}")
+    try:
+        msg_b = await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text_b[:4096],
+            reply_markup=_pair_version_b_keyboard(id_b),
+        )
+        set_draft_telegram_id(id_b, msg_b.message_id)
+    except Exception as e:
+        logger.error(f"Failed to send promo version B ({id_b}): {e}")
 
 
 # ── callback handler ──────────────────────────────────────────────────────────
@@ -562,13 +611,39 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n_videos = len(get_processed_video_ids())
     n_posts = count_good_posts()
     n_queue = len(get_approved_drafts())
-    await update.message.reply_text(
-        f"📊 *Stats*\n"
-        f"• Videos processed: *{n_videos}*\n"
-        f"• Approved posts \\(style examples\\): *{n_posts}*\n"
-        f"• Ready to post \\(queue\\): *{n_queue}*",
-        parse_mode="MarkdownV2",
-    )
+
+    lines = [
+        f"📊 Stats\n",
+        f"• Videos processed: {n_videos}",
+        f"• Approved posts (style examples): {n_posts}",
+        f"• Ready to post (queue): {n_queue}",
+        "",
+        "Recent videos:",
+    ]
+    for v in get_recent_video_summaries(limit=8):
+        jobs = v["jobs_run"] or ""
+        seen = []
+        for j in jobs.split(","):
+            j = j.strip()
+            if j and j not in seen:
+                seen.append(j)
+        jobs_str = ", ".join(seen) if seen else "none"
+
+        source_icon = "▶️" if v["source"] == "youtube" else ("💾" if v["source"] == "local" else "•")
+        dur = v["duration_seconds"]
+        if dur:
+            if dur < 600:
+                dur_str = f"{dur // 60}m (short)"
+            elif dur < 1800:
+                dur_str = f"{dur // 60}m"
+            else:
+                dur_str = f"{dur // 3600}h {(dur % 3600) // 60}m (long)"
+        else:
+            dur_str = "?"
+
+        lines.append(f"  {source_icon} {v['title'][:38]}  {dur_str}  [{jobs_str}]")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -625,8 +700,7 @@ async def cmd_processlocal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    file_path = context.args[0]
-    title = " ".join(context.args[1:]) if len(context.args) > 1 else Path(file_path).stem
+    file_path, title = _resolve_file_args(context.args)
 
     if not Path(file_path).exists():
         await update.message.reply_text(
@@ -692,6 +766,56 @@ def _is_media_doc(doc) -> bool:
     return mime.startswith("video/") or mime.startswith("audio/")
 
 
+async def cmd_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/promo <url> — generate promotional title/hook/caption for a video."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: `/promo <youtube_url>`", parse_mode="MarkdownV2")
+        return
+
+    url = context.args[0]
+    await update.message.reply_text("🔍 Fetching video info\\.\\.\\.", parse_mode="MarkdownV2")
+
+    video = fetch_single_video(url)
+    if not video:
+        await update.message.reply_text("❌ Could not fetch video\\. Check the URL\\.", parse_mode="MarkdownV2")
+        return
+
+    await update.message.reply_text(
+        f"🎬 Generating promo for: *{_esc(video['title'])}*",
+        parse_mode="MarkdownV2",
+    )
+    await _process_promo_video(context.application, video)
+
+
+async def cmd_promolocal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/promolocal <path> [title] — generate promo from a local file."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/promolocal <file_path> [optional title]`",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    file_path, title = _resolve_file_args(context.args)
+
+    if not Path(file_path).exists():
+        await update.message.reply_text(
+            f"❌ File not found: `{_esc(file_path)}`",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    await update.message.reply_text(
+        f"🎬 Generating promo for: *{_esc(title)}*\nTranscribing \\(may take a while\\)\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+    await _process_promo_local_file(context.application, file_path, title)
+
+
 async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all approved posts ready to copy-paste."""
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
@@ -720,15 +844,65 @@ def _format_queue_item(draft: dict) -> str:
 
     if fmt == "tweet":
         return header + content
-    else:
+    elif fmt == "thread":
         tweets = json.loads(content)
         body = "\n\n".join(f"{i + 1}/ {_strip_tweet_number(t)}" for i, t in enumerate(tweets))
         return header + f"🧵 Thread:\n\n{body}"
+    elif fmt == "promo":
+        data = json.loads(content)
+        return (
+            header
+            + f"🎬 Title: {data['title']}\n\n"
+            + f"🪝 Hook: {data['hook']}\n\n"
+            + f"📝 Caption:\n{data['caption']}"
+        )
+    return header + content
 
 
 def _strip_tweet_number(text: str) -> str:
     """Remove leading '1/ ' or '1. ' that Claude sometimes includes in thread tweets."""
     return re.sub(r"^\d+[/.]\s*", "", text.strip())
+
+
+def _resolve_file_args(args: list) -> tuple[str, str]:
+    """Parse path and optional title from command args.
+
+    Handles three cases:
+      - Quoted:   "C:\\path with spaces\\file.mp4" My Title
+      - Unquoted: C:\\path with spaces\\file.mp4 My Title  (prefix scan)
+      - No title: either format, title falls back to filename stem
+
+    Returns (file_path, title).
+    """
+    full = " ".join(args)
+
+    # Quoted path: starts with " — find closing quote
+    if full.startswith('"'):
+        close = full.find('"', 1)
+        if close != -1:
+            file_path = full[1:close]
+            title = full[close + 1:].strip() or Path(file_path).stem
+            return file_path, title
+        # Unclosed quote — strip leading quote and fall through
+        full = full[1:]
+        args = full.split()
+
+    # Unquoted: try progressively longer prefixes until one exists on disk
+    file_path = None
+    title_parts = []
+    for i in range(len(args), 0, -1):
+        candidate = " ".join(args[:i])
+        if Path(candidate).exists():
+            file_path = candidate
+            title_parts = args[i:]
+            break
+
+    if not file_path:
+        file_path = args[0]
+        title_parts = args[1:]
+
+    title = " ".join(title_parts) if title_parts else Path(file_path).stem
+    return file_path, title
 
 
 # ── core processing ───────────────────────────────────────────────────────────
@@ -741,7 +915,11 @@ async def _process_video(app: Application, video: dict):
     transcript = get_transcript(youtube_id, title)
     transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
 
-    video_id = upsert_video(youtube_id, title, video["url"], transcript_path)
+    video_id = upsert_video(
+        youtube_id, title, video["url"], transcript_path,
+        source="youtube",
+        duration_seconds=video.get("duration_seconds"),
+    )
 
     if not transcript:
         logger.warning(f"No transcript for {youtube_id}")
@@ -772,6 +950,8 @@ async def _process_video(app: Application, video: dict):
         )
         await send_idea_pair(app, id_a, id_b, title, idea)
 
+    log_video_job(video_id, "tweets", len(ideas))
+
 
 async def _process_local_file(
     app: Application,
@@ -782,7 +962,7 @@ async def _process_local_file(
     """Transcribe a local file with Whisper and generate drafts."""
     video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
 
-    transcript = transcribe_local_file(file_path, video_id)
+    transcript, duration = transcribe_local_file(file_path, video_id)
 
     if delete_after:
         Path(file_path).unlink(missing_ok=True)
@@ -796,7 +976,11 @@ async def _process_local_file(
         return
 
     transcript_path = f"transcripts/{video_id}.txt"
-    video_db_id = upsert_video(video_id, title, file_path, transcript_path)
+    video_db_id = upsert_video(
+        video_id, title, file_path, transcript_path,
+        source="local",
+        duration_seconds=duration,
+    )
 
     ideas = generate_posts(video_id, title, transcript)
     if not ideas:
@@ -820,6 +1004,79 @@ async def _process_local_file(
             original_str, trend_str, idea.get("trend_reason", "")
         )
         await send_idea_pair(app, id_a, id_b, title, idea)
+
+    log_video_job(video_db_id, "tweets", len(ideas))
+
+
+async def _process_promo_video(app: Application, video: dict):
+    """Generate promo content (title/hook/caption) for a YouTube video."""
+    youtube_id = video["youtube_id"]
+    title = video["title"]
+
+    transcript = get_transcript(youtube_id, title)
+    transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
+    video_id = upsert_video(
+        youtube_id, title, video["url"], transcript_path,
+        source="youtube",
+        duration_seconds=video.get("duration_seconds"),
+    )
+
+    if not transcript:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"⚠️ No transcript for: *{_esc(title)}*",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    promo = generate_promo(youtube_id, title, transcript)
+    if not promo:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"⚠️ Promo generation failed for: {title}",
+        )
+        return
+
+    original_content = json.dumps({"title": promo["title_a"], "hook": promo["hook_a"], "caption": promo["caption_a"]})
+    trend_content    = json.dumps({"title": promo["title_b"], "hook": promo["hook_b"], "caption": promo["caption_b"]})
+    id_a, id_b = add_draft_pair(video_id, "promo", original_content, trend_content, promo.get("trend_reason", ""))
+    await send_promo_pair(app, id_a, id_b, title, promo)
+    log_video_job(video_id, "promo", 1)
+
+
+async def _process_promo_local_file(app: Application, file_path: str, title: str):
+    """Generate promo content from a local file."""
+    video_id_str = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
+
+    transcript, duration = transcribe_local_file(file_path, video_id_str)
+    if not transcript:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"❌ Whisper failed to transcribe: *{_esc(title)}*",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    transcript_path = f"transcripts/{video_id_str}.txt"
+    video_db_id = upsert_video(
+        video_id_str, title, file_path, transcript_path,
+        source="local",
+        duration_seconds=duration,
+    )
+
+    promo = generate_promo(video_id_str, title, transcript)
+    if not promo:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"⚠️ Promo generation failed for: {title}",
+        )
+        return
+
+    original_content = json.dumps({"title": promo["title_a"], "hook": promo["hook_a"], "caption": promo["caption_a"]})
+    trend_content    = json.dumps({"title": promo["title_b"], "hook": promo["hook_b"], "caption": promo["caption_b"]})
+    id_a, id_b = add_draft_pair(video_db_id, "promo", original_content, trend_content, promo.get("trend_reason", ""))
+    await send_promo_pair(app, id_a, id_b, title, promo)
+    log_video_job(video_db_id, "promo", 1)
 
 
 # ── scheduled jobs ────────────────────────────────────────────────────────────
@@ -861,13 +1118,15 @@ async def scheduled_post_job(context: ContextTypes.DEFAULT_TYPE):
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("check",        "Trigger daily YouTube channel check"),
-        BotCommand("process",      "Process a specific YouTube URL"),
+        BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
-        BotCommand("processlocal", "Transcribe a local file on the server"),
+        BotCommand("processlocal", "Extract tweet ideas from a local file"),
+        BotCommand("promo",        "Generate video title, hook & caption from a URL"),
+        BotCommand("promolocal",   "Generate promo content from a local file"),
         BotCommand("queue",        "Show approved posts ready to publish"),
         BotCommand("retrospective","Re-analyse archived transcripts with new examples"),
         BotCommand("autopost",     "Toggle X auto-posting on/off"),
-        BotCommand("status",       "Stats: videos processed, approved posts, queue size"),
+        BotCommand("status",       "Stats + recent video job history"),
     ])
 
 
@@ -880,6 +1139,8 @@ def main():
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))
     app.add_handler(CommandHandler("processlocal",  cmd_processlocal))
+    app.add_handler(CommandHandler("promo",         cmd_promo))
+    app.add_handler(CommandHandler("promolocal",    cmd_promolocal))
     app.add_handler(CommandHandler("queue",         cmd_queue))
     app.add_handler(CommandHandler("autopost",      cmd_autopost))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))

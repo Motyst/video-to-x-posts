@@ -16,6 +16,7 @@ two versions of each post.
 Rules for both versions:
 - NEVER use the em dash character —. It is the single most detectable AI writing tell. Replace with a period, comma, colon, or rewrite the sentence. This rule has no exceptions.
 - No generic motivational filler. Every post must deliver a specific, concrete idea.
+- Start every tweet (including each tweet in a thread) with one relevant emoji. Pick based on the content, not randomly. One emoji only — at the very beginning.
 - Single tweet: sharp insight, memorable quote, or punchy one-liner. Max 280 chars.
 - Thread: an idea that earns depth (3 to 7 tweets). Each tweet must stand alone \
 but pull the reader to the next one.
@@ -51,6 +52,77 @@ Schema:
   }
 ]
 """
+
+
+PROMO_SYSTEM_PROMPT = """\
+You are a social media content creator for David's X (Twitter) account.
+
+Goal: write promotional content that makes people want to watch David's video.
+This is NOT about extracting ideas — it is about selling the video itself.
+
+Rules:
+- NEVER use the em dash character —. Replace with period, comma, colon, or rewrite. No exceptions.
+- No generic hype. Every line must be specific to what is actually in this video.
+- Title: under 100 chars, creates curiosity, makes the viewer feel they are missing something.
+- Hook: single opening line. Stops the scroll. Implies a payoff without giving it away.
+- Caption: 3 to 5 sentences. Tease the value, build tension, end with a soft CTA to watch.
+
+Version A — Original:
+- Match David's communication style exactly from the transcript.
+- His vocabulary, tone, sentence rhythm, energy level.
+
+Version B — Trend angle:
+- Same video, reframed around a content angle that currently performs well on X.
+- Strong angles: curiosity gaps, specific numbers, direct challenges, story-first openers.
+- Include a brief reason (1 to 2 sentences) explaining the angle choice.
+
+Output: a JSON object only — no explanation, no markdown, just the object.
+Schema:
+{
+  "title_a": "Version A title",
+  "hook_a": "Version A hook (one line)",
+  "caption_a": "Version A full caption",
+  "title_b": "Version B title",
+  "hook_b": "Version B hook (one line)",
+  "caption_b": "Version B full caption",
+  "trend_reason": "Why this angle works right now"
+}
+"""
+
+
+def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:
+    """Generate promotional content (title + hook + caption) for a video.
+
+    Returns dict with keys: title_a, hook_a, caption_a, title_b, hook_b, caption_b, trend_reason.
+    Returns None on failure.
+    """
+    user_prompt = (
+        f'Video: "{title}"\n\n'
+        f"Transcript:\n{transcript[:20000]}\n\n"
+        "Write promotional content for this video. Return only the JSON object."
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2000,
+        system=PROMO_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    raw = response.content[0].text.strip()
+    raw = _strip_code_fence(raw)
+
+    try:
+        promo = json.loads(raw)
+        if not isinstance(promo, dict):
+            raise ValueError("Expected a JSON object")
+        return {
+            k: v.replace("—", ",").replace(" ,", ",") if isinstance(v, str) else v
+            for k, v in promo.items()
+        }
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Invalid promo response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        return None
 
 
 def generate_posts(youtube_id: str, title: str, transcript: str) -> list:

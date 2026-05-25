@@ -34,20 +34,23 @@ def _try_captions(youtube_id: str) -> str | None:
         return None
 
 
-def transcribe_local_file(file_path: str, video_id: str) -> str | None:
-    """Transcribe a local audio/video file with Whisper and cache the result."""
+def transcribe_local_file(file_path: str, video_id: str) -> tuple[str | None, int | None]:
+    """Transcribe a local audio/video file with Whisper and cache the result.
+
+    Returns (transcript_text, duration_seconds). Either may be None on failure.
+    """
     Path(TRANSCRIPTS_DIR).mkdir(exist_ok=True)
 
     cache = Path(TRANSCRIPTS_DIR) / f"{video_id}.txt"
     if cache.exists():
         logger.info(f"Transcript cache hit: {video_id}")
-        return cache.read_text(encoding="utf-8")
+        return cache.read_text(encoding="utf-8"), None  # duration unknown from cache
 
-    text = _run_whisper(file_path, video_id)
+    text, duration = _run_whisper(file_path, video_id)
     if text:
         cache.write_text(text, encoding="utf-8")
         logger.info(f"Local transcript saved: {video_id} ({len(text)} chars)")
-    return text
+    return text, duration
 
 
 def _try_whisper(youtube_id: str, title: str) -> str | None:
@@ -70,7 +73,8 @@ def _try_whisper(youtube_id: str, title: str) -> str | None:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        return _run_whisper(str(audio_path), youtube_id)
+        text, _ = _run_whisper(str(audio_path), youtube_id)
+        return text
     except Exception as e:
         logger.error(f"Whisper (YouTube download) failed for {youtube_id}: {e}")
         return None
@@ -78,19 +82,24 @@ def _try_whisper(youtube_id: str, title: str) -> str | None:
         audio_path.unlink(missing_ok=True)
 
 
-def _run_whisper(audio_path: str, label: str) -> str | None:
-    """Run Whisper on any local audio/video file."""
+def _run_whisper(audio_path: str, label: str) -> tuple[str | None, int | None]:
+    """Run Whisper on any local audio/video file.
+
+    Returns (transcript_text, duration_seconds). Either may be None on failure.
+    """
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         logger.error("faster-whisper not installed. Run: pip install faster-whisper")
-        return None
+        return None, None
 
     try:
         logger.info(f"Whisper transcribing '{label}' ({WHISPER_DEVICE}/{WHISPER_MODEL})")
         model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE)
-        segments, _ = model.transcribe(audio_path)
-        return " ".join(seg.text.strip() for seg in segments)
+        segments, info = model.transcribe(audio_path)
+        text = " ".join(seg.text.strip() for seg in segments)
+        duration = int(info.duration) if info and info.duration else None
+        return text, duration
     except Exception as e:
         logger.error(f"Whisper failed for '{label}': {e}")
-        return None
+        return None, None
