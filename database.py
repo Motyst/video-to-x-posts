@@ -264,6 +264,19 @@ def get_scheduled_drafts() -> list:
         return [dict(r) for r in rows]
 
 
+def get_all_scheduled_drafts() -> list:
+    """All future scheduled drafts ordered by fire time."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT d.id, d.format, d.content, d.scheduled_for, v.title
+            FROM   drafts d
+            JOIN   videos v ON v.id = d.video_id
+            WHERE  d.status = 'scheduled'
+            ORDER  BY d.scheduled_for ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ── video_jobs ────────────────────────────────────────────────────────────────
 
 def log_video_job(video_id: int, job_type: str, draft_count: int = 0):

@@ -29,6 +29,7 @@ from database import (
     add_draft_pair,
     add_good_post,
     count_good_posts,
+    get_all_scheduled_drafts,
     get_approved_drafts,
     get_draft_by_id,
     get_draft_partner,
@@ -119,21 +120,22 @@ def _pair_version_b_keyboard(id_b: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _queue_keyboard(draft_id: int) -> InlineKeyboardMarkup:
-    """Keyboard shown on each item in /queue."""
-    if twitter_configured():
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🚀 Post Now",  callback_data=f"sched_now_{draft_id}"),
-                InlineKeyboardButton("⏰ Schedule",   callback_data=f"queue_sched_{draft_id}"),
-            ],
-            [
-                InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
-            ],
-        ])
-    return InlineKeyboardMarkup([[
+def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
+    """Keyboard shown on each item in /queue. Promo = manual only, no auto-post buttons."""
+    manual_only = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
     ]])
+    if fmt == "promo" or not twitter_configured():
+        return manual_only
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Post Now",  callback_data=f"sched_now_{draft_id}"),
+            InlineKeyboardButton("⏰ Schedule",   callback_data=f"queue_sched_{draft_id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
+        ],
+    ])
 
 
 def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -392,14 +394,15 @@ async def _handle_pair_action(query, context, action: str, draft_id: int):
 
     version_label = "Original" if action == "pair_a" else "Trend angle"
 
-    if _auto_post_enabled and twitter_configured():
+    if _auto_post_enabled and twitter_configured() and chosen["format"] != "promo":
         await query.edit_message_text(
             query.message.text + f"\n\n✅ {version_label} approved. When to post?",
             reply_markup=_schedule_keyboard(chosen["id"]),
         )
     else:
+        suffix = " — copy from /queue when ready" if chosen["format"] == "promo" else " — added to queue"
         await query.edit_message_text(
-            query.message.text + f"\n\n✅ {version_label} approved — added to queue",
+            query.message.text + f"\n\n✅ {version_label} approved{suffix}",
         )
 
 
@@ -572,6 +575,85 @@ async def cmd_retrospective(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = await run_retrospective(_send_pair)
     await update.message.reply_text(f"Retrospective done. {count} new idea pairs created.")
+
+
+async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scheduled — list all posts queued for auto-posting with time and preview."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    drafts = get_all_scheduled_drafts()
+    if not drafts:
+        await update.message.reply_text("No posts scheduled.")
+        return
+
+    now = datetime.now(timezone.utc)
+
+    def _preview(d: dict) -> str:
+        fmt, content = d["format"], d["content"]
+        if fmt == "tweet":
+            text = content
+        elif fmt == "thread":
+            tweets = json.loads(content)
+            text = tweets[0] if tweets else content
+        elif fmt == "promo":
+            data = json.loads(content)
+            text = data.get("hook") or data.get("title") or content
+        else:
+            text = content
+        text = text.strip()
+        return (text[:50].rstrip() + "…") if len(text) > 50 else text
+
+    def _fire_time(d: dict) -> datetime:
+        return datetime.strptime(d["scheduled_for"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+    def _time_str(fire: datetime) -> str:
+        delta = fire - now
+        if delta.total_seconds() < 3600:
+            return f"in {int(delta.total_seconds() // 60)}m"
+        if delta.days == 0:
+            return fire.strftime("today %H:%M UTC")
+        if delta.days == 1:
+            return fire.strftime("tomorrow %H:%M UTC")
+        return fire.strftime("%b %d %H:%M UTC")
+
+    icon = lambda fmt: "📝" if fmt == "tweet" else ("🧵" if fmt == "thread" else "🎬")
+
+    overdue  = [d for d in drafts if _fire_time(d) <= now]
+    upcoming = [d for d in drafts if _fire_time(d) > now]
+
+    lines = []
+
+    if overdue:
+        await update.message.reply_text(
+            f"⚠️ {len(overdue)} overdue (not posted). Choose action for each:"
+        )
+        for d in overdue:
+            fire = _fire_time(d)
+            text = (
+                f"📌 {d['title']}\n"
+                f"Was due: {fire.strftime('%b %d %H:%M UTC')}\n\n"
+                f"{_preview(d)}"
+            )
+            # Reset to approved so queue keyboard actions work correctly
+            update_draft_status(d["id"], "approved")
+            await context.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=text,
+                reply_markup=_queue_keyboard(d["id"], fmt=d["format"]),
+            )
+
+    if upcoming:
+        lines = [f"⏰ {len(upcoming)} upcoming:"]
+        for d in upcoming:
+            lines.append(f"  {icon(d['format'])} {_time_str(_fire_time(d))}  \"{_preview(d)}\"")
+        await context.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text="\n".join(lines),
+        )
+
+    if not overdue and not upcoming:
+        await update.message.reply_text("Nothing scheduled.")
 
 
 async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -832,7 +914,7 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=text,
-            reply_markup=_queue_keyboard(draft["id"]),
+            reply_markup=_queue_keyboard(draft["id"], fmt=draft["format"]),
         )
 
 
@@ -1124,6 +1206,7 @@ async def _post_init(app: Application):
         BotCommand("promo",        "Generate video title, hook & caption from a URL"),
         BotCommand("promolocal",   "Generate promo content from a local file"),
         BotCommand("queue",        "Show approved posts ready to publish"),
+        BotCommand("scheduled",    "List scheduled posts with time and preview"),
         BotCommand("retrospective","Re-analyse archived transcripts with new examples"),
         BotCommand("autopost",     "Toggle X auto-posting on/off"),
         BotCommand("status",       "Stats + recent video job history"),
@@ -1142,6 +1225,7 @@ def main():
     app.add_handler(CommandHandler("promo",         cmd_promo))
     app.add_handler(CommandHandler("promolocal",    cmd_promolocal))
     app.add_handler(CommandHandler("queue",         cmd_queue))
+    app.add_handler(CommandHandler("scheduled",     cmd_scheduled))
     app.add_handler(CommandHandler("autopost",      cmd_autopost))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))
     app.add_handler(CommandHandler("status",        cmd_status))
