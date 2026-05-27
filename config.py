@@ -10,6 +10,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")
+YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "")
 
 DB_PATH = os.getenv("DB_PATH", "david_bot.db")
 TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")

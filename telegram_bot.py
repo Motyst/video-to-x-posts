@@ -62,6 +62,8 @@ _pending_edits: dict[int, int] = {}
 _pending_file_titles: dict[int, tuple[str, str]] = {}
 # chat_id -> draft_id awaiting custom schedule time
 _pending_schedule_times: dict[int, int] = {}
+# chat_id -> True when awaiting manual example text
+_pending_examples: dict[int, bool] = {}
 
 # Runtime toggle — can be flipped via /autopost without restart
 _auto_post_enabled: bool = AUTO_POST
@@ -503,6 +505,25 @@ def _parse_schedule_time(text: str) -> datetime | None:
 async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
 
+    # Manual style example
+    if chat_id in _pending_examples:
+        _pending_examples.pop(chat_id)
+        raw = update.message.text.strip()
+        parts = [p.strip() for p in raw.split("\n---\n") if p.strip()]
+        if len(parts) > 1:
+            fmt = "thread"
+            content = json.dumps(parts)
+        else:
+            fmt = "tweet"
+            content = raw
+        add_good_post(None, fmt, content)
+        total = count_good_posts()
+        await update.message.reply_text(
+            f"✅ Saved as style example \\({fmt}\\)\\. Total examples: {total}",
+            parse_mode="MarkdownV2",
+        )
+        return
+
     # Custom schedule time
     if chat_id in _pending_schedule_times:
         draft_id = _pending_schedule_times.pop(chat_id)
@@ -685,6 +706,19 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📋 Auto-post OFF. Approved posts go to manual queue.")
     else:
         await update.message.reply_text("Usage: /autopost on  or  /autopost off")
+
+
+async def cmd_addexample(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually add a post as a style example for future Claude calls."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+    _pending_examples[update.effective_chat.id] = True
+    await update.message.reply_text(
+        "📝 Send the post text to save as a style example\\.\n\n"
+        "Single tweet: paste as\\-is\\.\n"
+        "Thread: separate tweets with `---` on its own line\\.",
+        parse_mode="MarkdownV2",
+    )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1209,6 +1243,7 @@ async def _post_init(app: Application):
         BotCommand("scheduled",    "List scheduled posts with time and preview"),
         BotCommand("retrospective","Re-analyse archived transcripts with new examples"),
         BotCommand("autopost",     "Toggle X auto-posting on/off"),
+        BotCommand("addexample",   "Add a post as a style example for Claude"),
         BotCommand("status",       "Stats + recent video job history"),
     ])
 
@@ -1227,6 +1262,7 @@ def main():
     app.add_handler(CommandHandler("queue",         cmd_queue))
     app.add_handler(CommandHandler("scheduled",     cmd_scheduled))
     app.add_handler(CommandHandler("autopost",      cmd_autopost))
+    app.add_handler(CommandHandler("addexample",    cmd_addexample))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))
     app.add_handler(CommandHandler("status",        cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))

@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
-from config import TRANSCRIPTS_DIR, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_MODEL
+from config import TRANSCRIPTS_DIR, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_MODEL, YOUTUBE_COOKIES_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ def _try_whisper(youtube_id: str, title: str) -> str | None:
             "outtmpl": str(audio_path.with_suffix("")),
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
             "quiet": True,
+            **({"cookiefile": YOUTUBE_COOKIES_FILE} if YOUTUBE_COOKIES_FILE else {}),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
