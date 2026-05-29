@@ -55,15 +55,25 @@ def get_unprocessed_videos(channel_url: str) -> list:
 
 
 def fetch_single_video(url: str) -> dict | None:
-    """Fetch metadata for one video URL (any YouTube URL format)."""
-    ydl_opts = {"quiet": True, "no_warnings": True, **_cookies_opt()}
+    """Fetch metadata for one video URL (any YouTube URL format).
+
+    Uses process=False to skip format resolution — we only need id/title/duration.
+    """
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        **_cookies_opt(),
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
-            info = ydl.extract_info(url, download=False)
+            # process=False skips format selection — safe for metadata-only fetches
+            info = ydl.extract_info(url, download=False, process=False)
         except Exception as e:
             logger.error(f"Failed to fetch video info for {url}: {e}")
             return None
 
+    if not info:
+        return None
     vid_id = info.get("id")
     if not vid_id:
         return None
