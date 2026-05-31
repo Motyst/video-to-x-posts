@@ -250,6 +250,15 @@ def set_draft_scheduled(draft_id: int, scheduled_for: str):
         )
 
 
+def unschedule_draft(draft_id: int):
+    """Cancel a scheduled post — revert to approved status."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE drafts SET status='approved', scheduled_for=NULL, updated_at=datetime('now') WHERE id=?",
+            (draft_id,),
+        )
+
+
 def get_scheduled_drafts() -> list:
     """All scheduled drafts whose time has arrived."""
     with _connect() as conn:

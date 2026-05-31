@@ -2,7 +2,7 @@ import json
 import logging
 from anthropic import Anthropic
 from database import get_good_posts
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ARTICLE_TARGET_WORDS, ARTICLE_OUTPUT_FORMAT
 
 logger = logging.getLogger(__name__)
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -88,6 +88,97 @@ Schema:
   "trend_reason": "Why this angle works right now"
 }
 """
+
+
+ARTICLE_SYSTEM_PROMPT = """\
+You are a ghostwriter for David's X (Twitter) long-form articles.
+
+Goal: write a single article from the video transcript in David's exact voice.
+
+Rules:
+- NEVER use the em dash character —. Replace with period, comma, colon, or rewrite. No exceptions.
+- Write ONLY in David's voice — his vocabulary, rhythm, energy, sentence structure from the transcript.
+- No filler, no generic advice. Every sentence must carry weight.
+- Structure: clear title, natural sections with headers, strong opening, strong close.
+- Length: judge based on content depth. Short transcript = shorter article. Rich transcript = longer. \
+Do not pad. Do not cut good material.
+- No corporate language, no AI-sounding phrases.
+
+Output: a JSON object only — no explanation, no markdown wrapper, just the object.
+Schema:
+{
+  "title": "Article title",
+  "body": "Full article body using X article markdown:\\n# for section headers\\n\\nParagraphs separated by blank lines\\n**bold** for emphasis"
+}
+"""
+
+
+def format_article_for_output(article: dict, fmt: str = None) -> str:
+    """Convert article dict to a string ready for the target platform.
+
+    Change ARTICLE_OUTPUT_FORMAT in .env (or pass fmt) to switch platforms.
+    Supported: 'x_native' (default).
+    Future: 'substack', 'html', 'plain'.
+    """
+    fmt = fmt or ARTICLE_OUTPUT_FORMAT
+    title = article.get("title", "").strip()
+    body = article.get("body", "").strip()
+
+    if fmt == "x_native":
+        # X article editor: title on first line, blank line, then body markdown
+        return f"{title}\n\n{body}"
+
+    # Fallback — plain concatenation
+    return f"{title}\n\n{body}"
+
+
+def generate_article(youtube_id: str, title: str, transcript: str) -> dict | None:
+    """Generate a long-form article in David's voice.
+
+    Returns dict with keys: title, body. Returns None on failure.
+    To change target length: set ARTICLE_TARGET_WORDS in .env (e.g. '800').
+    """
+    good_posts = get_good_posts(limit=10)
+    few_shot = _build_few_shot_block(good_posts)
+
+    length_hint = ""
+    if ARTICLE_TARGET_WORDS:
+        length_hint = f"Target length: approximately {ARTICLE_TARGET_WORDS} words.\n\n"
+
+    user_prompt = (
+        f'Video: "{title}"\n\n'
+        f"{few_shot}"
+        f"{length_hint}"
+        f"Transcript:\n{transcript[:25000]}\n\n"
+        "Write the article. Return only the JSON object."
+    )
+
+    try:
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8000,
+            system=ARTICLE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.error(f"Article generation failed for {youtube_id}: {e}")
+        return None
+
+    raw = response.content[0].text.strip()
+    raw = _strip_code_fence(raw)
+
+    try:
+        article = json.loads(raw)
+        if not isinstance(article, dict):
+            raise ValueError("Expected JSON object")
+        # strip em dashes from all fields
+        return {
+            k: v.replace("—", ",").replace(" ,", ",") if isinstance(v, str) else v
+            for k, v in article.items()
+        }
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Invalid article response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        return None
 
 
 def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:

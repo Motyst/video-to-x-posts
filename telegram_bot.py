@@ -40,6 +40,7 @@ from database import (
     log_video_job,
     mark_draft_posted,
     set_draft_scheduled,
+    unschedule_draft,
     set_draft_telegram_id,
     update_draft_status,
     upsert_video,
@@ -47,7 +48,7 @@ from database import (
 from twitter_poster import post_draft, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
-from content_generator import generate_posts, generate_promo
+from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output
 from retrospective import run_retrospective
 
 logging.basicConfig(
@@ -310,6 +311,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mark_draft_posted(draft_id)
         await query.edit_message_text(
             query.message.text + "\n\n🚀 Marked as posted",
+        )
+        return
+
+    if action == "unschedule":
+        unschedule_draft(draft_id)
+        await query.edit_message_text(
+            query.message.text + "\n\n❌ Unscheduled — moved back to queue",
+            reply_markup=None,
         )
         return
 
@@ -665,14 +674,24 @@ async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     if upcoming:
-        lines = [f"⏰ {len(upcoming)} upcoming:"]
-        for d in upcoming:
-            lines.append(f"  {icon(d['format'])} {_time_str(_fire_time(d))}  \"{_preview(d)}\"")
         await context.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="\n".join(lines),
+            text=f"⏰ {len(upcoming)} upcoming scheduled:",
         )
-
+        for d in upcoming:
+            fire = _fire_time(d)
+            text = (
+                f"{icon(d['format'])} {_time_str(fire)}  •  {d['title']}\n\n"
+                f"{_preview(d)}"
+            )
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Unschedule", callback_data=f"unschedule_{d['id']}"),
+            ]])
+            await context.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=text,
+                reply_markup=kb,
+            )
     if not overdue and not upcoming:
         await update.message.reply_text("Nothing scheduled.")
 
@@ -706,6 +725,83 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📋 Auto-post OFF. Approved posts go to manual queue.")
     else:
         await update.message.reply_text("Usage: /autopost on  or  /autopost off")
+
+
+async def cmd_fetchtranscripts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch transcripts for channel videos — no Claude, no drafts.
+
+    Usage: /fetchtranscripts [N]
+    Skips videos that already have a cached transcript, so repeated calls
+    automatically continue from where the previous run left off.
+    """
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    limit = 10
+    if context.args:
+        try:
+            limit = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Usage: /fetchtranscripts [number]  e.g. /fetchtranscripts 10")
+            return
+
+    if not YOUTUBE_CHANNEL_URL:
+        await update.message.reply_text("YOUTUBE_CHANNEL_URL not set in .env")
+        return
+
+    await update.message.reply_text(f"🔍 Scanning channel for videos without transcripts...")
+
+    from youtube_monitor import fetch_channel_videos
+    from transcript import get_transcript
+    from config import TRANSCRIPTS_DIR
+
+    try:
+        all_videos = fetch_channel_videos(YOUTUBE_CHANNEL_URL)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to fetch channel: {e}")
+        return
+
+    pending = [
+        v for v in all_videos
+        if not (Path(TRANSCRIPTS_DIR) / f"{v['youtube_id']}.txt").exists()
+    ]
+
+    total_without = len(pending)
+    batch = pending[:limit]
+
+    if not batch:
+        await update.message.reply_text(
+            f"✅ All {len(all_videos)} channel videos already have transcripts."
+        )
+        return
+
+    await update.message.reply_text(
+        f"📥 Fetching transcripts for {len(batch)} videos "
+        f"({total_without} remaining without transcript). This may take a while."
+    )
+
+    done = 0
+    failed = 0
+    for v in batch:
+        try:
+            transcript = get_transcript(v["youtube_id"], v["title"])
+            if transcript:
+                done += 1
+                logger.info(f"Transcript fetched: {v['youtube_id']} — {v['title']}")
+            else:
+                failed += 1
+                logger.warning(f"No transcript for {v['youtube_id']} — {v['title']}")
+        except Exception as e:
+            failed += 1
+            logger.error(f"Transcript error for {v['youtube_id']}: {e}")
+
+    remaining = total_without - done
+    lines = [f"✅ Done: {done}  ❌ Failed: {failed}"]
+    if remaining > 0:
+        lines.append(f"📋 {remaining} videos still without transcript — run /fetchtranscripts {limit} to continue")
+    else:
+        lines.append("🎉 All channel videos now have transcripts")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_addexample(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -880,6 +976,84 @@ async def on_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _is_media_doc(doc) -> bool:
     mime = doc.mime_type or ""
     return mime.startswith("video/") or mime.startswith("audio/")
+
+
+async def cmd_article(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/article <url> — write a long-form X article in David's voice."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: `/article <youtube_url>`", parse_mode="MarkdownV2")
+        return
+
+    url = context.args[0]
+    await update.message.reply_text("🔍 Fetching video info...")
+
+    video = fetch_single_video(url)
+    if not video:
+        await update.message.reply_text("❌ Could not fetch video. Check the URL.")
+        return
+
+    await update.message.reply_text(
+        f"✍️ Writing article for: {video['title']}\nThis may take a moment..."
+    )
+    await _process_article_video(context.application, video)
+
+
+async def _process_article_video(app: Application, video: dict):
+    """Generate a long-form article for a YouTube video and send as file."""
+    youtube_id = video["youtube_id"]
+    title = video["title"]
+
+    transcript = get_transcript(youtube_id, title)
+    transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
+    video_db_id = upsert_video(
+        youtube_id, title, video["url"], transcript_path,
+        source="youtube",
+        duration_seconds=video.get("duration_seconds"),
+    )
+
+    if not transcript:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"⚠️ No transcript available for: {title}",
+        )
+        return
+
+    article = generate_article(youtube_id, title, transcript)
+    if not article:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"⚠️ Article generation failed for: {title}",
+        )
+        return
+
+    # Save to DB
+    content_json = json.dumps(article)
+    draft_id = add_draft(video_db_id, "article", content_json)
+    log_video_job(video_db_id, "article", 1)
+
+    # Send as file attachment
+    article_text = format_article_for_output(article)
+    safe_title = re.sub(r"[^\w\s-]", "", title)[:50].strip().replace(" ", "_")
+    filename = f"article_{youtube_id}_{safe_title}.txt"
+
+    file_bytes = article_text.encode("utf-8")
+    word_count = len(article_text.split())
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
+        InlineKeyboardButton("❌ Discard",        callback_data=f"reject_{draft_id}"),
+    ]])
+
+    await app.bot.send_document(
+        chat_id=TELEGRAM_CHAT_ID,
+        document=file_bytes,
+        filename=filename,
+        caption=f"✍️ *{_esc(title)}*\n≈{word_count} words",
+        parse_mode="MarkdownV2",
+        reply_markup=kb,
+    )
 
 
 async def cmd_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1237,12 +1411,14 @@ async def _post_init(app: Application):
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
         BotCommand("processlocal", "Extract tweet ideas from a local file"),
+        BotCommand("article",      "Write a long-form X article from a YouTube video"),
         BotCommand("promo",        "Generate video title, hook & caption from a URL"),
         BotCommand("promolocal",   "Generate promo content from a local file"),
         BotCommand("queue",        "Show approved posts ready to publish"),
         BotCommand("scheduled",    "List scheduled posts with time and preview"),
         BotCommand("retrospective","Re-analyse archived transcripts with new examples"),
         BotCommand("autopost",     "Toggle X auto-posting on/off"),
+        BotCommand("fetchtranscripts", "Download transcripts only — no Claude, no drafts"),
         BotCommand("addexample",   "Add a post as a style example for Claude"),
         BotCommand("status",       "Stats + recent video job history"),
     ])
@@ -1257,11 +1433,13 @@ def main():
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))
     app.add_handler(CommandHandler("processlocal",  cmd_processlocal))
+    app.add_handler(CommandHandler("article",       cmd_article))
     app.add_handler(CommandHandler("promo",         cmd_promo))
     app.add_handler(CommandHandler("promolocal",    cmd_promolocal))
     app.add_handler(CommandHandler("queue",         cmd_queue))
     app.add_handler(CommandHandler("scheduled",     cmd_scheduled))
     app.add_handler(CommandHandler("autopost",      cmd_autopost))
+    app.add_handler(CommandHandler("fetchtranscripts", cmd_fetchtranscripts))
     app.add_handler(CommandHandler("addexample",    cmd_addexample))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))
     app.add_handler(CommandHandler("status",        cmd_status))

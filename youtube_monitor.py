@@ -26,11 +26,22 @@ def fetch_channel_videos(channel_url: str) -> list:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(channel_url, download=False)
 
-    entries = info.get("entries", [])
+    # yt-dlp may return nested playlists (Shorts, Live tabs) — flatten one level
+    raw_entries = info.get("entries", [])
+    entries = []
+    for e in raw_entries:
+        if e.get("_type") == "playlist" or (e.get("id") and len(e["id"]) != 11):
+            # sub-playlist: grab its entries if already loaded, else skip
+            for sub in e.get("entries") or []:
+                entries.append(sub)
+        else:
+            entries.append(e)
+
     videos = []
     for entry in entries:
         vid_id = entry.get("id")
-        if vid_id:
+        # YouTube video IDs are always exactly 11 chars — skip channels/playlists
+        if vid_id and len(vid_id) == 11:
             videos.append({
                 "youtube_id": vid_id,
                 "title": entry.get("title", ""),

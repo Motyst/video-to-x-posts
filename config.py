@@ -21,6 +21,10 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 
+# Article generation
+ARTICLE_TARGET_WORDS = os.getenv("ARTICLE_TARGET_WORDS", "")   # empty = Claude decides
+ARTICLE_OUTPUT_FORMAT = os.getenv("ARTICLE_OUTPUT_FORMAT", "x_native")  # swap to change platform
+
 # X / Twitter
 TWITTER_API_KEY = os.getenv("TWITTER_API_KEY", "")
 TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET", "")

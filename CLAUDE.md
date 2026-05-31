@@ -11,8 +11,9 @@ telegram_bot.py  ← main entry point, all user interaction
     ├── content_generator.py ← Claude API, few-shot from approved posts
     ├── retrospective.py     ← re-mine old transcripts with newer examples
     └── database.py          ← SQLite: videos / drafts / good_posts / video_jobs
-config.py        ← all env vars, loaded once at import
-twitter_poster.py ← X/Twitter API posting via tweepy
+config.py          ← all env vars, loaded once at import
+twitter_poster.py  ← X/Twitter API posting via tweepy
+fetch_transcript.py ← standalone script: fetch transcript locally, no Claude
 ```
 
 ## Database Schema
@@ -23,7 +24,7 @@ Four tables in `david_bot.db`:
 videos      — youtube_id (UNIQUE), title, url, transcript_path, processed_at,
               retrospective_reviewed_at, source ('youtube'|'local'), duration_seconds
 
-drafts      — video_id, format (tweet|thread|promo), content (TEXT), status
+drafts      — video_id, format (tweet|thread|promo|article), content (TEXT), status
               (pending|approved|rejected|posted|scheduled), telegram_message_id,
               version ('original'|'trend'), pair_id (links the two versions),
               trend_reason, scheduled_for, posted_url
@@ -38,6 +39,7 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 - `format=tweet` → plain string
 - `format=thread` → JSON array of strings, one per tweet
 - `format=promo` → JSON object `{"title": "...", "hook": "...", "caption": "..."}`
+- `format=article` → JSON object `{"title": "...", "body": "..."}` (body uses X article markdown)
 
 ## Key Design Decisions
 
@@ -59,6 +61,16 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 **Transcript strategy** — tries YouTube auto-captions first (fast, free), falls back to Whisper (slower, better quality). Local files go straight to Whisper. All cached as `.txt` files.
 
 **Retrospective** — `retrospective.py` re-mines old transcripts monthly using current approved examples. Won't run until 5+ good posts exist.
+
+**Long-form articles** — `/article <url>` generates a full X article in David's voice (single version, no trend angle). Delivered as a `.txt` file attachment in Telegram. Length: Claude decides by default; set `ARTICLE_TARGET_WORDS` in `.env` to override. Output format abstracted via `format_article_for_output()` in `content_generator.py` — change `ARTICLE_OUTPUT_FORMAT` in `.env` to switch platforms.
+
+**Manual style examples** — `/addexample` lets you paste any post (from David or others) directly into `good_posts` as a few-shot example. No video needed.
+
+**Transcript-only batch fetch** — `/fetchtranscripts [N]` downloads transcripts for the next N channel videos without calling Claude. Skips videos with cached transcripts, so repeated calls auto-continue from where the last run stopped. Use `fetch_transcript.py` script for single-URL fetching from terminal.
+
+**VPS IP block workaround** — YouTube blocks most datacenter IPs. Solution: fetch transcripts locally (`fetch_transcript.py` or `/fetchtranscripts`), upload `.txt` files to VPS, then run `/process <url>` on VPS — finds cached transcript, skips YouTube entirely. Set `YOUTUBE_COOKIES_FILE` in `.env` for yt-dlp cookie auth as additional bypass.
+
+**Unschedule posts** — `/scheduled` shows each upcoming scheduled post with ❌ Unschedule button. Tapping reverts draft to `approved` status and moves it back to `/queue`.
 
 **X/Twitter auto-post** — `twitter_poster.py` posts via tweepy. Toggle at runtime with `/autopost on|off` — no restart needed. When enabled, approving a draft shows a scheduling keyboard (+1h/+2h/+4h/+8h/+24h/Custom/Now). Scheduled posts fired by a job running every 60 seconds.
 
@@ -82,7 +94,11 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 | `/processlocal <path> [title]` | Extract tweet ideas from a local file |
 | `/promo <url>` | Generate title + hook + caption for a YouTube video |
 | `/promolocal <path> [title]` | Generate promo content from a local file |
+| `/article <url>` | Write a long-form X article in David's voice (delivered as .txt file) |
+| `/fetchtranscripts [N]` | Download transcripts for next N channel videos — no Claude, no drafts |
+| `/addexample` | Paste any post as a style example for Claude |
 | `/queue` | Show all approved posts ready to copy-paste |
+| `/scheduled` | List upcoming scheduled posts with ❌ Unschedule button per post |
 | `/retrospective` | Re-analyse all archived transcripts |
 | `/autopost [on\|off]` | Toggle X auto-posting; no args shows current state |
 | `/status` | Stats + recent video job history |
@@ -101,6 +117,7 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 _pending_edits: dict[int, int]               # chat_id → draft_id
 _pending_file_titles: dict[int, tuple]       # chat_id → (tmp_path, suggested_title)
 _pending_schedule_times: dict[int, int]      # chat_id → draft_id awaiting custom time
+_pending_examples: dict[int, bool]           # chat_id → True when awaiting example text
 ```
 
 Lost on bot restart — in-flight edits/uploads drop silently. Acceptable given low volume.
@@ -131,6 +148,9 @@ Daily check fires at `DAILY_CHECK_HOUR` UTC (default 9). Bot must stay running �
 | `WHISPER_COMPUTE` | `int8` | `float16` for GPU |
 | `WHISPER_MODEL` | `base` | `medium` or `large-v3` for better quality |
 | `AUTO_POST` | `false` | Default state for X auto-posting on startup |
+| `YOUTUBE_COOKIES_FILE` | `` | Path to cookies.txt for yt-dlp auth (needed on VPS to bypass IP blocks) |
+| `ARTICLE_TARGET_WORDS` | `` | Target word count for articles; empty = Claude decides |
+| `ARTICLE_OUTPUT_FORMAT` | `x_native` | Article output format; change to switch platforms |
 | `TWITTER_API_KEY` | — | X Developer Portal |
 | `TWITTER_API_SECRET` | — | X Developer Portal |
 | `TWITTER_ACCESS_TOKEN` | — | X Developer Portal |

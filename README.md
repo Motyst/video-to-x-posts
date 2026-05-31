@@ -6,7 +6,7 @@ Telegram bot that monitors a YouTube channel, transcribes videos, and generates 
 
 1. **Monitors** a YouTube channel for new videos (daily automatic check)
 2. **Transcribes** each video (YouTube captions → Whisper fallback)
-3. **Generates** X post ideas from the transcript using Claude AI
+3. **Generates** X post ideas and long-form articles from the transcript using Claude AI
 4. **Sends drafts to Telegram** for review — approve, edit, or reject
 5. **Posts to X** manually or automatically on a schedule
 
@@ -31,10 +31,13 @@ The bot gets smarter over time: every approved post is saved as a style example 
 
 - Two-version drafts (original style vs trend angle) for every idea
 - Inline Telegram review — approve / edit / reject without leaving chat
+- Long-form article generation in David's voice — delivered as `.txt` file in Telegram
 - Promo content generation (title + hook + caption) for posting alongside videos
-- Scheduled X posting (+1h / +2h / +4h / +8h / +24h / custom)
+- Scheduled X posting (+1h / +2h / +4h / +8h / +24h / custom) with unschedule button
 - Retrospective: re-mines old transcripts monthly using newer style examples
 - Local file processing — transcribe and generate posts from video files on disk
+- Transcript-only batch fetch — download transcripts without generating posts
+- Manual style examples — paste any post directly into the feedback loop
 - Style feedback loop — approved posts improve future generation quality
 
 ## Setup
@@ -58,6 +61,8 @@ python telegram_bot.py
 | `WHISPER_MODEL` | Default: `base`. Use `medium` or `large-v3` for better accuracy |
 | `WHISPER_DEVICE` | `cpu` or `cuda` |
 | `AUTO_POST` | `true` to enable X auto-posting on startup |
+| `ARTICLE_TARGET_WORDS` | Target word count for articles. Empty = Claude decides |
+| `ARTICLE_OUTPUT_FORMAT` | `x_native` (default). Change to switch article platform format |
 | `TWITTER_API_KEY` / `TWITTER_API_SECRET` / `TWITTER_ACCESS_TOKEN` / `TWITTER_ACCESS_SECRET` | X Developer Portal |
 
 ## Telegram commands
@@ -67,10 +72,13 @@ python telegram_bot.py
 | `/check` | Trigger daily YouTube channel check |
 | `/process <url>` | Generate post drafts from a YouTube URL |
 | `/processlocal <path>` | Generate post drafts from a local video file |
+| `/article <url>` | Write a long-form X article in David's voice |
 | `/promo <url>` | Generate promo content for a YouTube video |
 | `/promolocal <path>` | Generate promo content from a local video file |
 | `/processall` | Process entire unprocessed channel backlog |
+| `/fetchtranscripts [N]` | Download transcripts for next N videos — no Claude, no drafts |
 | `/queue` | Show approved posts ready to publish |
+| `/scheduled` | List scheduled posts — tap ❌ to unschedule any |
 | `/addexample` | Add a post as a style example for Claude |
 | `/retrospective` | Re-analyse all archived transcripts |
 | `/autopost [on\|off]` | Toggle X auto-posting |
