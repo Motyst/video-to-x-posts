@@ -62,6 +62,7 @@ This is NOT about extracting ideas — it is about selling the video itself.
 
 Rules:
 - NEVER use the em dash character —. Replace with period, comma, colon, or rewrite. No exceptions.
+- NEVER write in third person. Never say "David explains", "David shares", "he talks about", or any variant. Write AS the person speaking, in first person, or write directly to the viewer in second person.
 - No generic hype. Every line must be specific to what is actually in this video.
 - Title: under 100 chars, creates curiosity, makes the viewer feel they are missing something.
 - Hook: single opening line. Stops the scroll. Implies a payoff without giving it away.
@@ -178,6 +179,82 @@ def generate_article(youtube_id: str, title: str, transcript: str) -> dict | Non
         }
     except (json.JSONDecodeError, ValueError) as e:
         logger.error(f"Invalid article response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        return None
+
+
+VIDEO_CAPTION_SYSTEM_PROMPT = """\
+You are a caption writer for video posts on X (Twitter).
+
+Goal: write 4 different captions for the same video. All in the exact voice of the person \
+speaking — derived from the transcript. No exceptions.
+
+Rules:
+- NEVER use the em dash character —. Replace with period, comma, colon, or rewrite.
+- NEVER write in third person. Never say "David says", "he explains", "the speaker shares", or any variant.
+- Write AS the speaker (first person) or directly to the viewer (second person).
+- Every caption must feel like this specific person wrote it — use their vocabulary, rhythm, energy.
+- No generic motivational filler. Every sentence must earn its place.
+
+Caption 1 — Original (1-2 sentences, SHORT):
+Most faithful to exactly what was said. Use the speaker's own words and phrasing wherever possible.
+
+Caption 2 — Problem (1-2 sentences, SHORT):
+Target a specific struggle that ambitious people face which this video addresses. \
+Create instant recognition ("that's me") without giving away the solution.
+
+Caption 3 — Key Lesson (3-4 sentences, LONGER):
+Extract the single most important insight. Build from setup to payoff. End with why it matters.
+
+Caption 4 — Hook (3-4 sentences, LONGER):
+A compelling hook that would stop the scroll. Any angle — story, contrast, bold claim, \
+unexpected truth — as long as it is grounded in this video's content.
+
+Output: JSON object only — no explanation, no markdown wrapper.
+Schema:
+{
+  "original": "...",
+  "problem": "...",
+  "lesson": "...",
+  "hook": "..."
+}
+"""
+
+
+def generate_video_post_captions(video_id: str, title: str, transcript: str) -> dict | None:
+    """Generate 4 caption variants for a video post on X.
+
+    Returns dict with keys: original, problem, lesson, hook. None on failure.
+    """
+    user_prompt = (
+        f'Video: "{title}"\n\n'
+        f"Transcript:\n{transcript[:20000]}\n\n"
+        "Write the 4 captions. Return only the JSON object."
+    )
+
+    try:
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=2000,
+            system=VIDEO_CAPTION_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.error(f"Video caption generation failed for {video_id}: {e}")
+        return None
+
+    raw = response.content[0].text.strip()
+    raw = _strip_code_fence(raw)
+
+    try:
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError("Expected JSON object")
+        return {
+            k: v.replace("—", ",").replace(" ,", ",") if isinstance(v, str) else v
+            for k, v in result.items()
+        }
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Invalid caption response for {video_id}: {e}\nRaw: {raw[:300]}")
         return None
 
 

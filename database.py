@@ -224,12 +224,26 @@ def get_approved_drafts() -> list:
     """All approved drafts not yet marked as posted, with their video title."""
     with _connect() as conn:
         rows = conn.execute("""
-            SELECT d.id, d.format, d.content, d.updated_at, v.title
+            SELECT d.id, d.format, d.content, d.updated_at,
+                   COALESCE(v.title, '(no video)') AS title
             FROM   drafts d
-            JOIN   videos v ON v.id = d.video_id
+            LEFT JOIN videos v ON v.id = d.video_id
             WHERE  d.status = 'approved'
             ORDER  BY d.updated_at DESC
         """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_recent_promo_drafts(limit: int = 4) -> list:
+    """Recent promo drafts for caption selection in video posts."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT d.id, d.content, COALESCE(v.title, '') AS title
+            FROM   drafts d
+            LEFT JOIN videos v ON v.id = d.video_id
+            WHERE  d.format = 'promo'
+            ORDER  BY d.created_at DESC LIMIT ?
+        """, (limit,)).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -263,9 +277,10 @@ def get_scheduled_drafts() -> list:
     """All scheduled drafts whose time has arrived."""
     with _connect() as conn:
         rows = conn.execute("""
-            SELECT d.id, d.format, d.content, d.scheduled_for, v.title
+            SELECT d.id, d.format, d.content, d.scheduled_for,
+                   COALESCE(v.title, '(no video)') AS title
             FROM   drafts d
-            JOIN   videos v ON v.id = d.video_id
+            LEFT JOIN videos v ON v.id = d.video_id
             WHERE  d.status = 'scheduled'
             AND    d.scheduled_for <= datetime('now')
             ORDER  BY d.scheduled_for ASC
@@ -277,9 +292,10 @@ def get_all_scheduled_drafts() -> list:
     """All future scheduled drafts ordered by fire time."""
     with _connect() as conn:
         rows = conn.execute("""
-            SELECT d.id, d.format, d.content, d.scheduled_for, v.title
+            SELECT d.id, d.format, d.content, d.scheduled_for,
+                   COALESCE(v.title, '(no video)') AS title
             FROM   drafts d
-            JOIN   videos v ON v.id = d.video_id
+            LEFT JOIN videos v ON v.id = d.video_id
             WHERE  d.status = 'scheduled'
             ORDER  BY d.scheduled_for ASC
         """).fetchall()

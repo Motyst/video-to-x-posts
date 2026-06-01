@@ -38,6 +38,7 @@ from database import (
     get_scheduled_drafts,
     init_db,
     log_video_job,
+    get_recent_promo_drafts,
     mark_draft_posted,
     set_draft_scheduled,
     unschedule_draft,
@@ -48,7 +49,7 @@ from database import (
 from twitter_poster import post_draft, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
-from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output
+from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions
 from retrospective import run_retrospective
 
 logging.basicConfig(
@@ -65,6 +66,12 @@ _pending_file_titles: dict[int, tuple[str, str]] = {}
 _pending_schedule_times: dict[int, int] = {}
 # chat_id -> True when awaiting manual example text
 _pending_examples: dict[int, bool] = {}
+# chat_id -> video file path, awaiting custom caption text
+_pending_video_captions: dict[int, str] = {}
+# chat_id -> {path, caption_a, caption_b} — generated options waiting for pick
+_video_caption_options: dict[int, dict] = {}
+# chat_ids where next file received = video post (not transcription)
+_video_upload_mode: set[int] = set()
 
 # Runtime toggle — can be flipped via /autopost without restart
 _auto_post_enabled: bool = AUTO_POST
@@ -304,6 +311,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Video caption selection — no integer ID suffix
+    if query.data.startswith("vcap_"):
+        chat_id = query.message.chat_id
+        opts = _video_caption_options.pop(chat_id, None)
+        _pending_video_captions.pop(chat_id, None)
+        if not opts:
+            await query.edit_message_text("Session expired. Run /schedulevideo again.")
+            return
+        key = query.data[len("vcap_"):]  # original / problem / lesson / hook
+        caption = opts.get(key, "")
+        vdraft_id = add_draft(None, "video_post", json.dumps({"path": opts["path"], "caption": caption}))
+        update_draft_status(vdraft_id, "approved")
+        preview = caption[:120] + ("..." if len(caption) > 120 else "")
+        await query.edit_message_text(
+            f"✅ Caption set. When to post?\n\n{preview}",
+            reply_markup=_schedule_keyboard(vdraft_id),
+        )
+        return
+
     action, draft_id_str = query.data.rsplit("_", 1)
     draft_id = int(draft_id_str)
 
@@ -447,10 +473,10 @@ async def _handle_schedule_action(query, context, action: str, draft_id: int, dr
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=(
-                "Send the time to post (all times UTC):\n\n"
-                "• 15:30  →  today at 15:30 UTC\n"
-                "• tomorrow 09:00\n"
-                "• 2025-06-01 14:00"
+                f"Send the time to post (all times UTC):\n\n"
+                f"• 15:30  →  today at 15:30 UTC\n"
+                f"• tomorrow 09:00\n"
+                f"• {datetime.now(timezone.utc).strftime('%Y-%m-%d')} 14:00"
             ),
         )
 
@@ -465,6 +491,12 @@ async def _fire_post(app, draft_id: int, draft: dict):
     try:
         url = post_draft(draft["format"], draft["content"])
         mark_draft_posted(draft_id, url)
+        # Clean up video file from server after successful post
+        if draft["format"] == "video_post":
+            try:
+                Path(json.loads(draft["content"])["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=f"🚀 Posted!\n{url}",
@@ -502,7 +534,10 @@ def _parse_schedule_time(text: str) -> datetime | None:
 
     # YYYY-MM-DD HH:MM
     try:
-        return datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        if dt <= now:
+            return None  # caller will surface "time is in the past" error
+        return dt
     except ValueError:
         pass
 
@@ -513,6 +548,19 @@ def _parse_schedule_time(text: str) -> datetime | None:
 
 async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
+
+    # Video post caption input
+    if chat_id in _pending_video_captions:
+        path = _pending_video_captions.pop(chat_id)
+        caption = update.message.text.strip()
+        vdraft_id = add_draft(None, "video_post", json.dumps({"path": path, "caption": caption}))
+        update_draft_status(vdraft_id, "approved")
+        preview = caption[:120] + ("..." if len(caption) > 120 else "")
+        await update.message.reply_text(
+            f"✅ Caption set. When to post?\n\n{preview}",
+            reply_markup=_schedule_keyboard(vdraft_id),
+        )
+        return
 
     # Manual style example
     if chat_id in _pending_examples:
@@ -945,11 +993,22 @@ async def on_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_size = getattr(tg_file, "file_size", 0) or 0
     if file_size > 20 * 1024 * 1024:
-        await msg.reply_text(
-            f"⚠️ File is *{file_size // (1024*1024)} MB* — Telegram bot API limit is 20 MB\\.\n"
-            "Copy the file to the server and use `/processlocal <path>` instead\\.",
-            parse_mode="MarkdownV2",
+        limit_msg = (
+            f"⚠️ File is {file_size // (1024*1024)} MB — Telegram bot API limit is 20 MB.\n"
+            "SCP the file to the server and use /schedulevideo <path> or /processlocal <path> instead."
         )
+        await msg.reply_text(limit_msg)
+        return
+
+    # Video post scheduling mode — route to video post flow instead of transcription
+    if msg.chat_id in _video_upload_mode:
+        _video_upload_mode.discard(msg.chat_id)
+        fname = getattr(tg_file, "file_name", None) or "video.mp4"
+        dest = Path("uploads") / fname
+        dest.parent.mkdir(exist_ok=True)
+        tg_file_obj = await context.bot.get_file(tg_file.file_id)
+        await tg_file_obj.download_to_drive(str(dest))
+        await _generate_video_captions(context.bot, msg.chat_id, str(dest))
         return
 
     # Suggest title from caption or filename
@@ -976,6 +1035,75 @@ async def on_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _is_media_doc(doc) -> bool:
     mime = doc.mime_type or ""
     return mime.startswith("video/") or mime.startswith("audio/")
+
+
+async def _generate_video_captions(bot, chat_id: int, file_path: str):
+    """Transcribe video, generate promo captions, show as selection buttons."""
+    title = Path(file_path).stem
+    video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
+
+    await bot.send_message(chat_id=chat_id, text=f"🎬 Transcribing: {title}\nThis may take a while...")
+
+    transcript, _ = transcribe_local_file(file_path, video_id)
+    if not transcript:
+        _pending_video_captions[chat_id] = file_path
+        await bot.send_message(chat_id=chat_id, text="⚠️ Transcription failed. Type caption manually:")
+        return
+
+    await bot.send_message(chat_id=chat_id, text="✍️ Generating captions...")
+    caps = generate_video_post_captions(video_id, title, transcript)
+
+    if not caps:
+        _pending_video_captions[chat_id] = file_path
+        await bot.send_message(chat_id=chat_id, text="⚠️ Caption generation failed. Type caption manually:")
+        return
+
+    _video_caption_options[chat_id] = {
+        "path": file_path,
+        "original": caps.get("original", ""),
+        "problem":  caps.get("problem", ""),
+        "lesson":   caps.get("lesson", ""),
+        "hook":     caps.get("hook", ""),
+    }
+    _pending_video_captions[chat_id] = file_path  # fallback if user types custom
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣ Original",    callback_data="vcap_original")],
+        [InlineKeyboardButton("2️⃣ Problem",     callback_data="vcap_problem")],
+        [InlineKeyboardButton("3️⃣ Key Lesson",  callback_data="vcap_lesson")],
+        [InlineKeyboardButton("4️⃣ Hook",        callback_data="vcap_hook")],
+    ])
+    text = (
+        f"✅ 4 captions for: {title}\n\n"
+        f"1️⃣ ORIGINAL (short)\n{caps.get('original', '')}\n\n"
+        f"2️⃣ PROBLEM (short)\n{caps.get('problem', '')}\n\n"
+        f"3️⃣ KEY LESSON (longer)\n{caps.get('lesson', '')}\n\n"
+        f"4️⃣ HOOK (longer)\n{caps.get('hook', '')}\n\n"
+        "Pick one, or type your own:"
+    )
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+
+async def cmd_schedulevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/schedulevideo [path] — transcribe video, pick caption, schedule to X."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+    if not twitter_configured():
+        await update.message.reply_text("⚠️ Twitter API keys not configured.")
+        return
+
+    if context.args:
+        file_path = " ".join(context.args)
+        if not Path(file_path).exists():
+            await update.message.reply_text(f"❌ File not found: {file_path}")
+            return
+        await _generate_video_captions(context.bot, update.effective_chat.id, file_path)
+    else:
+        _video_upload_mode.add(update.effective_chat.id)
+        await update.message.reply_text(
+            "📹 Send the video file (max 20 MB via Telegram).\n"
+            "For larger files use: /schedulevideo /path/to/video.mp4"
+        )
 
 
 async def cmd_article(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1411,6 +1539,7 @@ async def _post_init(app: Application):
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
         BotCommand("processlocal", "Extract tweet ideas from a local file"),
+        BotCommand("schedulevideo", "Upload a video to X — pick caption and schedule"),
         BotCommand("article",      "Write a long-form X article from a YouTube video"),
         BotCommand("promo",        "Generate video title, hook & caption from a URL"),
         BotCommand("promolocal",   "Generate promo content from a local file"),
@@ -1433,6 +1562,7 @@ def main():
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))
     app.add_handler(CommandHandler("processlocal",  cmd_processlocal))
+    app.add_handler(CommandHandler("schedulevideo", cmd_schedulevideo))
     app.add_handler(CommandHandler("article",       cmd_article))
     app.add_handler(CommandHandler("promo",         cmd_promo))
     app.add_handler(CommandHandler("promolocal",    cmd_promolocal))
