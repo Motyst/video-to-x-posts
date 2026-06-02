@@ -14,6 +14,7 @@ YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "")
 
 DB_PATH = os.getenv("DB_PATH", "david_bot.db")
 TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")
+UPLOADS_DIR = os.getenv("UPLOADS_DIR", "uploads")
 
 DAILY_CHECK_HOUR = int(os.getenv("DAILY_CHECK_HOUR", "9"))
 

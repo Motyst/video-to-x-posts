@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import tempfile
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,6 +22,7 @@ from config import (
     DAILY_CHECK_HOUR,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    UPLOADS_DIR,
     YOUTUBE_CHANNEL_URL,
 )
 from database import (
@@ -62,8 +63,10 @@ logger = logging.getLogger(__name__)
 _pending_edits: dict[int, int] = {}
 # chat_id -> (temp_file_path, suggested_title) awaiting title confirmation
 _pending_file_titles: dict[int, tuple[str, str]] = {}
-# chat_id -> draft_id awaiting custom schedule time
+# chat_id -> draft_id awaiting custom schedule time (text fallback)
 _pending_schedule_times: dict[int, int] = {}
+# chat_id → {draft_id, date, hour} for step-by-step schedule builder
+_sched_builder: dict[int, dict] = {}
 # chat_id -> True when awaiting manual example text
 _pending_examples: dict[int, bool] = {}
 # chat_id -> video file path, awaiting custom caption text
@@ -72,6 +75,10 @@ _pending_video_captions: dict[int, str] = {}
 _video_caption_options: dict[int, dict] = {}
 # chat_ids where next file received = video post (not transcription)
 _video_upload_mode: set[int] = set()
+# chat_id → ordered list of video file paths from last /uploads listing
+_uploads_listing: dict[int, list[str]] = {}
+
+_VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.mp3', '.m4a', '.wav'}
 
 # Runtime toggle — can be flipped via /autopost without restart
 _auto_post_enabled: bool = AUTO_POST
@@ -146,6 +153,57 @@ def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
         ],
     ])
+
+
+def _day_picker_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    today = date.today()
+    rows = []
+    i = 0
+    while i < 14:
+        d = today + timedelta(days=i)
+        if i == 0:
+            rows.append([InlineKeyboardButton(
+                f"Today — {d.strftime('%a %d %b')}",
+                callback_data=f"sbday_{draft_id}_{i}",
+            )])
+            i += 1
+        elif i == 1:
+            rows.append([InlineKeyboardButton(
+                f"Tomorrow — {d.strftime('%a %d %b')}",
+                callback_data=f"sbday_{draft_id}_{i}",
+            )])
+            i += 1
+        else:
+            btn1 = InlineKeyboardButton(d.strftime("%a %d %b"), callback_data=f"sbday_{draft_id}_{i}")
+            if i + 1 < 14:
+                d2 = today + timedelta(days=i + 1)
+                btn2 = InlineKeyboardButton(d2.strftime("%a %d %b"), callback_data=f"sbday_{draft_id}_{i+1}")
+                rows.append([btn1, btn2])
+                i += 2
+            else:
+                rows.append([btn1])
+                i += 1
+    return InlineKeyboardMarkup(rows)
+
+
+def _hour_picker_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for h in range(0, 24, 4):
+        rows.append([
+            InlineKeyboardButton(f"{hr:02d}:__", callback_data=f"sbhr_{draft_id}_{hr}")
+            for hr in range(h, min(h + 4, 24))
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _minute_picker_keyboard(draft_id: int, selected_date: date, hour: int) -> InlineKeyboardMarkup:
+    label = f"{selected_date.strftime('%d %b')} {hour:02d}:"
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"{label}00", callback_data=f"sbmin_{draft_id}_0"),
+        InlineKeyboardButton(f"{label}15", callback_data=f"sbmin_{draft_id}_15"),
+        InlineKeyboardButton(f"{label}30", callback_data=f"sbmin_{draft_id}_30"),
+        InlineKeyboardButton(f"{label}45", callback_data=f"sbmin_{draft_id}_45"),
+    ]])
 
 
 def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -330,6 +388,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Step-by-step schedule builder (day → hour → minute)
+    if query.data.startswith(("sbday_", "sbhr_", "sbmin_")):
+        await _handle_sched_builder(query, context)
+        return
+
+    # Uploads folder: subfolder navigation
+    if query.data.startswith("ufolder_"):
+        subfolder_name = query.data[len("ufolder_"):]
+        search_dir = Path(UPLOADS_DIR) / subfolder_name
+        await _list_uploads_dir(query.message.chat_id, context, search_dir, subfolder=subfolder_name)
+        return
+
+    # Uploads folder: per-video action (upost_N / utran_N)
+    if query.data.startswith("upost_") or query.data.startswith("utran_"):
+        key, idx_str = query.data.split("_", 1)
+        idx = int(idx_str)
+        chat_id = query.message.chat_id
+        listing = _uploads_listing.get(chat_id, [])
+        if idx >= len(listing):
+            await query.edit_message_text("Session expired. Run /uploads again.")
+            return
+        file_path = listing[idx]
+        p = Path(file_path)
+        if not p.exists():
+            await query.edit_message_text(f"❌ File not found: {p.name}")
+            return
+        if key == "upost":
+            await query.edit_message_text(f"🎬 {p.name}\n⏳ Generating captions...")
+            await _generate_video_captions(context.bot, chat_id, file_path)
+        else:
+            await query.edit_message_text(f"📝 {p.name}\n⏳ Transcribing for tweet ideas...")
+            await _process_local_file(context.application, file_path, p.stem)
+        return
+
     action, draft_id_str = query.data.rsplit("_", 1)
     draft_id = int(draft_id_str)
 
@@ -400,6 +492,61 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_schedule_action(query, context, action, draft_id, draft)
 
 
+# ── schedule builder ─────────────────────────────────────────────────────────
+
+async def _handle_sched_builder(query, context):
+    chat_id = query.message.chat_id
+    data = query.data
+
+    if data.startswith("sbday_"):
+        _, draft_id_str, offset_str = data.split("_", 2)
+        draft_id = int(draft_id_str)
+        offset = int(offset_str)
+        selected_date = date.today() + timedelta(days=offset)
+        _sched_builder[chat_id] = {"draft_id": draft_id, "date": selected_date}
+        await query.edit_message_text(
+            query.message.text.split("\n\n📅")[0] + f"\n\n📅 {selected_date.strftime('%A %d %b')} — pick hour (UTC):",
+            reply_markup=_hour_picker_keyboard(draft_id),
+        )
+
+    elif data.startswith("sbhr_"):
+        _, draft_id_str, hour_str = data.split("_", 2)
+        draft_id = int(draft_id_str)
+        hour = int(hour_str)
+        state = _sched_builder.get(chat_id)
+        if not state or state["draft_id"] != draft_id:
+            await query.edit_message_text("Session expired. Tap schedule again.")
+            return
+        state["hour"] = hour
+        selected_date = state["date"]
+        await query.edit_message_text(
+            query.message.text.split("\n\n📅")[0] + f"\n\n📅 {selected_date.strftime('%d %b')} {hour:02d}:__ — pick minutes (UTC):",
+            reply_markup=_minute_picker_keyboard(draft_id, selected_date, hour),
+        )
+
+    elif data.startswith("sbmin_"):
+        _, draft_id_str, minute_str = data.split("_", 2)
+        draft_id = int(draft_id_str)
+        minute = int(minute_str)
+        state = _sched_builder.pop(chat_id, None)
+        if not state or state["draft_id"] != draft_id or "hour" not in state:
+            await query.edit_message_text("Session expired. Tap schedule again.")
+            return
+        d = state["date"]
+        dt = datetime(d.year, d.month, d.day, state["hour"], minute, tzinfo=timezone.utc)
+        if dt <= datetime.now(timezone.utc):
+            await query.edit_message_text(
+                query.message.text.split("\n\n📅")[0] + "\n\n⚠️ That time is in the past. Pick again:",
+                reply_markup=_day_picker_keyboard(draft_id),
+            )
+            return
+        set_draft_scheduled(draft_id, dt.strftime("%Y-%m-%d %H:%M:%S"))
+        label = dt.strftime("%a %d %b at %H:%M UTC")
+        await query.edit_message_text(
+            query.message.text.split("\n\n📅")[0] + f"\n\n⏰ Scheduled for {label}",
+        )
+
+
 # ── pair handlers ────────────────────────────────────────────────────────────
 
 async def _handle_pair_action(query, context, action: str, draft_id: int):
@@ -468,16 +615,9 @@ async def _handle_schedule_action(query, context, action: str, draft_id: int, dr
             )
 
     elif action == "sched_custom":
-        _pending_schedule_times[query.message.chat_id] = draft_id
-        await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                f"Send the time to post (all times UTC):\n\n"
-                f"• 15:30  →  today at 15:30 UTC\n"
-                f"• tomorrow 09:00\n"
-                f"• {datetime.now(timezone.utc).strftime('%Y-%m-%d')} 14:00"
-            ),
+        await query.edit_message_text(
+            query.message.text + "\n\n📅 Pick a day (UTC):",
+            reply_markup=_day_picker_keyboard(draft_id),
         )
 
     elif action == "sched_manual":
@@ -631,6 +771,88 @@ async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
+
+async def cmd_uploads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/uploads [N] [subfolder] — list videos from uploads folder to post or transcribe."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    args = context.args or []
+    limit = None
+    subfolder = None
+
+    if args:
+        try:
+            limit = int(args[0])
+            rest = args[1:]
+        except ValueError:
+            rest = args
+        if rest:
+            subfolder = " ".join(rest)
+
+    base = Path(UPLOADS_DIR)
+    search_dir = base / subfolder if subfolder else base
+    await _list_uploads_dir(update.effective_chat.id, context, search_dir, subfolder=subfolder, limit=limit)
+
+
+async def _list_uploads_dir(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    search_dir: Path,
+    subfolder: str | None = None,
+    limit: int | None = None,
+):
+    """Scan a directory and send per-video messages with action buttons."""
+    if not search_dir.exists():
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Folder not found: {search_dir}",
+        )
+        return
+
+    video_files = sorted(
+        [f for f in search_dir.iterdir() if f.is_file() and f.suffix.lower() in _VIDEO_EXTS],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    subfolders = [] if subfolder else sorted(d for d in search_dir.iterdir() if d.is_dir())
+
+    if not video_files and not subfolders:
+        label = f"uploads/{subfolder}/" if subfolder else "uploads/"
+        await context.bot.send_message(chat_id=chat_id, text=f"📁 No videos found in {label}")
+        return
+
+    batch = video_files[:limit] if limit else video_files
+    _uploads_listing[chat_id] = [str(v) for v in batch]
+
+    label = f"uploads/{subfolder}/" if subfolder else "uploads/"
+    header = f"📁 {label} — {len(batch)} video(s)"
+    if limit and len(video_files) > limit:
+        header += f" of {len(video_files)} total"
+
+    if subfolders:
+        folder_buttons = [
+            [InlineKeyboardButton(f"📂 {d.name}", callback_data=f"ufolder_{d.name[:50]}")]
+            for d in subfolders[:10]
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=header + ("\n\n📂 Subfolders — tap to browse:" if subfolders else ""),
+            reply_markup=InlineKeyboardMarkup(folder_buttons),
+        )
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=header)
+
+    for idx, vpath in enumerate(batch):
+        p = Path(vpath)
+        size_mb = p.stat().st_size / (1024 * 1024)
+        text = f"🎬 {p.name}\n📦 {size_mb:.1f} MB"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📹 Post video",     callback_data=f"upost_{idx}"),
+            InlineKeyboardButton("📝 Extract tweets", callback_data=f"utran_{idx}"),
+        ]])
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trigger the daily video check."""
@@ -1004,7 +1226,7 @@ async def on_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.chat_id in _video_upload_mode:
         _video_upload_mode.discard(msg.chat_id)
         fname = getattr(tg_file, "file_name", None) or "video.mp4"
-        dest = Path("uploads") / fname
+        dest = Path(UPLOADS_DIR) / fname
         dest.parent.mkdir(exist_ok=True)
         tg_file_obj = await context.bot.get_file(tg_file.file_id)
         await tg_file_obj.download_to_drive(str(dest))
@@ -1535,6 +1757,7 @@ async def scheduled_post_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
+        BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
         BotCommand("check",        "Trigger daily YouTube channel check"),
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
@@ -1558,6 +1781,7 @@ def main():
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
 
+    app.add_handler(CommandHandler("uploads",        cmd_uploads))
     app.add_handler(CommandHandler("check",         cmd_check))
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))
