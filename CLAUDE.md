@@ -155,3 +155,5 @@ Daily check fires at `DAILY_CHECK_HOUR` UTC (default 9). Bot must stay running �
 | `TWITTER_API_SECRET` | — | X Developer Portal |
 | `TWITTER_ACCESS_TOKEN` | — | X Developer Portal |
 | `TWITTER_ACCESS_SECRET` | — | X Developer Portal |
+
+Read LEARNING.md at the start of every session and follow its instructions.

@@ -347,6 +347,63 @@ def _strip_code_fence(text: str) -> str:
     return text
 
 
+HOOK_REWRITE_PROMPT = """\
+You are an X (Twitter) hook specialist writing in David's exact voice.
+
+Goal: rewrite the given hook/opening line as 3 stronger alternatives optimized for X engagement.
+
+Rules:
+- NEVER use the em dash character —. Replace with period, comma, colon, or rewrite.
+- Stay in David's voice — use his vocabulary, rhythm, energy from the style examples.
+- Each variant must work as a standalone tweet opener.
+- Start with one relevant emoji.
+
+Write exactly 3 variants:
+1. Curiosity gap: implies a payoff without revealing it, makes reader tap "more"
+2. Bold claim: counterintuitive, specific, challenges a common assumption
+3. Pattern interrupt: unexpected angle, contrast, or framing that stops the scroll
+
+Output: JSON array of exactly 3 strings — no explanation, no markdown.
+["variant 1", "variant 2", "variant 3"]
+"""
+
+
+def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
+    """Generate 3 alternative hooks. Returns list of 3 strings or None on failure."""
+    good_posts = get_good_posts(limit=10)
+    few_shot = _build_few_shot_block(good_posts)
+
+    user_prompt = (
+        f'Video: "{video_title}"\n\n'
+        f"{few_shot}"
+        f"Current hook:\n{hook_text}\n\n"
+        "Write 3 alternative hooks. Return only the JSON array."
+    )
+
+    try:
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=600,
+            system=HOOK_REWRITE_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.error(f"Hook rewrite failed: {e}")
+        return None
+
+    raw = response.content[0].text.strip()
+    raw = _strip_code_fence(raw)
+
+    try:
+        variants = json.loads(raw)
+        if not isinstance(variants, list) or len(variants) < 3:
+            raise ValueError("Expected array of 3")
+        return [v.replace("—", ",").replace(" ,", ",") for v in variants[:3]]
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Invalid hook rewrite response: {e}\nRaw: {raw[:300]}")
+        return None
+
+
 def _build_few_shot_block(good_posts: list) -> str:
     if not good_posts:
         return ""

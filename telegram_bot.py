@@ -50,7 +50,7 @@ from database import (
 from twitter_poster import post_draft, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
-from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions
+from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions, rewrite_hook
 from retrospective import run_retrospective
 
 logging.basicConfig(
@@ -77,6 +77,8 @@ _video_caption_options: dict[int, dict] = {}
 _video_upload_mode: set[int] = set()
 # chat_id → ordered list of video file paths from last /uploads listing
 _uploads_listing: dict[int, list[str]] = {}
+# chat_id → {draft_id, format, content, variants, video_title} for hook picker
+_pending_hook_picks: dict[int, dict] = {}
 
 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.mp3', '.m4a', '.wav'}
 
@@ -137,22 +139,59 @@ def _pair_version_b_keyboard(id_b: int) -> InlineKeyboardMarkup:
     ])
 
 
+def _extract_hook(draft: dict) -> tuple[str, str]:
+    """Return (hook_text, video_title) for a draft."""
+    fmt, content = draft["format"], draft["content"]
+    title = draft.get("title", "")
+    if fmt == "tweet":
+        return content, title
+    if fmt == "thread":
+        tweets = json.loads(content) if isinstance(content, str) else content
+        return (tweets[0] if tweets else ""), title
+    if fmt == "promo":
+        return json.loads(content).get("hook", ""), title
+    return "", title
+
+
+def _apply_hook(fmt: str, content: str, new_hook: str) -> str:
+    """Splice new_hook into content, preserving the rest."""
+    if fmt == "tweet":
+        return new_hook
+    if fmt == "thread":
+        tweets = json.loads(content) if isinstance(content, str) else content
+        tweets[0] = new_hook
+        return json.dumps(tweets)
+    if fmt == "promo":
+        data = json.loads(content)
+        data["hook"] = new_hook
+        return json.dumps(data)
+    return content
+
+
 def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
     """Keyboard shown on each item in /queue. Promo = manual only, no auto-post buttons."""
-    manual_only = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
-    ]])
+    hook_row = (
+        [InlineKeyboardButton("🎣 Rewrite hook", callback_data=f"hook_{draft_id}")]
+        if fmt in ("tweet", "thread") else None
+    )
+    posted_row = [InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}")]
+
     if fmt == "promo" or not twitter_configured():
-        return manual_only
-    return InlineKeyboardMarkup([
+        rows = [posted_row]
+        if hook_row:
+            rows.insert(0, hook_row)
+        return InlineKeyboardMarkup(rows)
+
+    rows = [
         [
-            InlineKeyboardButton("🚀 Post Now",  callback_data=f"sched_now_{draft_id}"),
-            InlineKeyboardButton("⏰ Schedule",   callback_data=f"queue_sched_{draft_id}"),
+            InlineKeyboardButton("🚀 Post Now", callback_data=f"sched_now_{draft_id}"),
+            InlineKeyboardButton("⏰ Schedule",  callback_data=f"queue_sched_{draft_id}"),
         ],
-        [
-            InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}"),
-        ],
-    ])
+        posted_row,
+    ]
+    if hook_row:
+        rows.insert(1, hook_row)
+    return InlineKeyboardMarkup(rows)
 
 
 def _day_picker_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -388,6 +427,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Hook pick — hpick_{draft_id}_{idx}
+    if query.data.startswith("hpick_"):
+        _, draft_id_str, idx_str = query.data.split("_", 2)
+        draft_id = int(draft_id_str)
+        idx = int(idx_str)
+        chat_id = query.message.chat_id
+        state = _pending_hook_picks.pop(chat_id, None)
+        if not state or state["draft_id"] != draft_id:
+            await query.edit_message_text("Session expired. Tap 🎣 again.")
+            return
+        variant = state["variants"][idx]
+        new_content = _apply_hook(state["format"], state["content"], variant)
+        update_draft_status(draft_id, "approved", new_content)
+        await query.edit_message_text(f"✅ Hook updated:\n\n{variant}")
+        return
+
     # Step-by-step schedule builder (day → hour → minute)
     if query.data.startswith(("sbday_", "sbhr_", "sbmin_")):
         await _handle_sched_builder(query, context)
@@ -485,8 +540,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "queue_sched":
-        # From /queue: swap keyboard to time picker
         await query.edit_message_reply_markup(reply_markup=_schedule_keyboard(draft_id))
+
+    elif action == "hook":
+        hook_text, video_title = _extract_hook(draft)
+        if not hook_text:
+            await query.edit_message_text(query.message.text + "\n\n⚠️ Could not extract hook.")
+            return
+        await query.edit_message_text(query.message.text + "\n\n🎣 Rewriting hook...")
+        variants = rewrite_hook(hook_text, video_title)
+        if not variants:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="⚠️ Hook rewrite failed.",
+            )
+            return
+        _pending_hook_picks[query.message.chat_id] = {
+            "draft_id": draft_id,
+            "format": draft["format"],
+            "content": draft["content"],
+            "variants": variants,
+        }
+        text = (
+            f"🎣 3 hook rewrites:\n\n"
+            f"1️⃣  {variants[0]}\n\n"
+            f"2️⃣  {variants[1]}\n\n"
+            f"3️⃣  {variants[2]}\n\n"
+            "Pick one to replace the hook, or ignore to keep original."
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("1️⃣", callback_data=f"hpick_{draft_id}_0"),
+            InlineKeyboardButton("2️⃣", callback_data=f"hpick_{draft_id}_1"),
+            InlineKeyboardButton("3️⃣", callback_data=f"hpick_{draft_id}_2"),
+        ]])
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            reply_markup=kb,
+        )
 
     elif action.startswith("sched"):
         await _handle_schedule_action(query, context, action, draft_id, draft)

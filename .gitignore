@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 venv/
 CHEATSHEET.md
+LEARNING.md
+LESSONS_LOG.md
 cookies.txt
 fetch_transcript.py
 cookies.txt
