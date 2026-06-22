@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import random
 import re
 import tempfile
 from datetime import date, datetime, time, timedelta, timezone
@@ -37,6 +38,7 @@ from database import (
     get_processed_video_ids,
     get_recent_video_summaries,
     get_scheduled_drafts,
+    has_tweets_job,
     init_db,
     log_video_job,
     get_recent_promo_drafts,
@@ -79,11 +81,98 @@ _video_upload_mode: set[int] = set()
 _uploads_listing: dict[int, list[str]] = {}
 # chat_id → {draft_id, format, content, variants, video_title} for hook picker
 _pending_hook_picks: dict[int, dict] = {}
+# chat_id → autoschedule setup state
+_pending_autoschedule: dict[int, dict] = {}
+# chat_id → {type, video/file info} awaiting reprocess confirmation
+_pending_reprocess: dict[int, dict] = {}
 
 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.mp3', '.m4a', '.wav'}
 
 # Runtime toggle — can be flipped via /autopost without restart
 _auto_post_enabled: bool = AUTO_POST
+
+
+# ── autoschedule helpers ──────────────────────────────────────────────────────
+
+def _parse_single_date(text: str) -> date | None:
+    text = text.strip()
+    now = datetime.now(timezone.utc)
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        pass
+    for fmt in ("%d %b", "%d %B", "%b %d", "%B %d"):
+        try:
+            return datetime.strptime(text, fmt).replace(year=now.year).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_date_range(text: str) -> tuple[date, date] | None:
+    text = text.strip()
+    # ISO "YYYY-MM-DD to YYYY-MM-DD"
+    m = re.match(r"(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})", text, re.I)
+    if m:
+        d1, d2 = _parse_single_date(m.group(1)), _parse_single_date(m.group(2))
+        if d1 and d2:
+            return d1, d2
+    # Natural "DD Mon - DD Mon" or "DD Mon to DD Mon"
+    for sep in [" to ", " - "]:
+        if sep.lower() in text.lower():
+            idx = text.lower().find(sep.lower())
+            d1 = _parse_single_date(text[:idx])
+            d2 = _parse_single_date(text[idx + len(sep):])
+            if d1 and d2:
+                return d1, d2
+    return None
+
+
+def _parse_hour(text: str) -> int | None:
+    text = text.strip()
+    try:
+        return int(text.split(":")[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_hour_range(text: str) -> tuple[int, int] | None:
+    text = text.strip()
+    for sep in [" to ", "-", "–"]:
+        if sep in text:
+            parts = text.split(sep, 1)
+            h1, h2 = _parse_hour(parts[0]), _parse_hour(parts[1])
+            if h1 is not None and h2 is not None:
+                return h1, h2
+    return None
+
+
+def _parse_gap_minutes(text: str) -> int | None:
+    text = text.strip().lower()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    m = re.match(r"^(\d+)h(?:(\d+)m?)?$", text)
+    if m:
+        return int(m.group(1)) * 60 + (int(m.group(2)) if m.group(2) else 0)
+    m = re.match(r"^(\d+\.?\d*)h$", text)
+    if m:
+        return int(float(m.group(1)) * 60)
+    m = re.match(r"^(\d+)m(?:in)?$", text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _place_posts_random(n: int, base_date: date, start_hour: int, end_hour: int, min_gap_min: int) -> list[datetime]:
+    """Place n posts randomly in [start_hour, end_hour] on base_date with min_gap_min between each."""
+    range_min = (end_hour - start_hour) * 60
+    free_space = range_min - (n - 1) * min_gap_min
+    points = sorted(random.uniform(0, free_space) for _ in range(n))
+    offsets = [int(points[i] + i * min_gap_min) for i in range(n)]
+    base = datetime(base_date.year, base_date.month, base_date.day, start_hour, 0, tzinfo=timezone.utc)
+    return [base + timedelta(minutes=o) for o in offsets]
 
 
 # ── formatting ────────────────────────────────────────────────────────────────
@@ -425,6 +514,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Caption set. When to post?\n\n{preview}",
             reply_markup=_schedule_keyboard(vdraft_id),
         )
+        return
+
+    # Reprocess confirmation
+    if query.data in ("rproc_yes", "rproc_no"):
+        chat_id = query.message.chat_id
+        state = _pending_reprocess.pop(chat_id, None)
+        if query.data == "rproc_no" or not state:
+            await query.edit_message_text(query.message.text + "\n\n❌ Cancelled")
+            return
+        if state["type"] == "youtube":
+            video = state["video"]
+            await query.edit_message_text(f"📹 Processing: {video['title']}")
+            await _process_video(context.application, video)
+        else:
+            await query.edit_message_text(
+                f"🎬 Processing: {state['title']}\nTranscribing (may take a while)..."
+            )
+            await _process_local_file(context.application, state["file_path"], state["title"])
+        return
+
+    # Auto-schedule confirm / cancel
+    if query.data in ("asched_yes", "asched_no"):
+        chat_id = query.message.chat_id
+        state = _pending_autoschedule.pop(chat_id, None)
+        if query.data == "asched_no" or not state or "schedule" not in state:
+            await query.edit_message_text(query.message.text + "\n\n❌ Cancelled")
+            return
+        schedule = state["schedule"]
+        for draft_id, dt in schedule:
+            set_draft_scheduled(draft_id, dt.strftime("%Y-%m-%d %H:%M:%S"))
+        base_text = query.message.text.replace("\n\nConfirm?", "")
+        await query.edit_message_text(base_text + f"\n\n✅ Scheduled {len(schedule)} posts")
         return
 
     # Hook pick — hpick_{draft_id}_{idx}
@@ -780,6 +901,11 @@ def _parse_schedule_time(text: str) -> datetime | None:
 async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
 
+    # Auto-schedule setup flow
+    if chat_id in _pending_autoschedule:
+        await _handle_autoschedule_step(update, context)
+        return
+
     # Video post caption input
     if chat_id in _pending_video_captions:
         path = _pending_video_captions.pop(chat_id)
@@ -862,6 +988,160 @@ async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
+
+async def cmd_autoschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/autoschedule — distribute approved queue posts across a date range."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    approved = get_approved_drafts()
+    schedulable = [d for d in approved if d["format"] in ("tweet", "thread")]
+
+    if not schedulable:
+        await update.message.reply_text("Queue is empty — no approved posts to schedule.")
+        return
+
+    _pending_autoschedule[update.effective_chat.id] = {"step": "date_range"}
+    await update.message.reply_text(
+        f"📅 Auto-schedule setup\n\n"
+        f"Queue has {len(schedulable)} schedulable posts.\n\n"
+        f"Step 1/4: Date range?\n"
+        f"Examples:  22 Jun - 30 Jun   or   2026-06-22 to 2026-06-30"
+    )
+
+
+async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = _pending_autoschedule.get(chat_id)
+    if not state:
+        return
+
+    text = update.message.text.strip()
+    step = state["step"]
+
+    if step == "date_range":
+        result = _parse_date_range(text)
+        if not result:
+            await update.message.reply_text("Couldn't parse. Try: 22 Jun - 30 Jun")
+            return
+        start_d, end_d = result
+        today = datetime.now(timezone.utc).date()
+        if end_d < start_d:
+            await update.message.reply_text("End date before start. Try again.")
+            return
+        state.update({"start_date": start_d, "end_date": end_d, "step": "posts_per_day"})
+        days = (end_d - start_d).days + 1
+        await update.message.reply_text(
+            f"✅ {start_d.strftime('%d %b')} → {end_d.strftime('%d %b')} ({days} days)\n\n"
+            f"Step 2/4: How many posts per day?"
+        )
+
+    elif step == "posts_per_day":
+        try:
+            n = int(text)
+            if n < 1 or n > 20:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a number 1-20.")
+            return
+        state.update({"posts_per_day": n, "step": "hour_range"})
+        await update.message.reply_text(
+            f"✅ {n} posts per day\n\n"
+            f"Step 3/4: Hour range (UTC)?\n"
+            f"Example:  9-18   or   09:00-21:00"
+        )
+
+    elif step == "hour_range":
+        result = _parse_hour_range(text)
+        if not result:
+            await update.message.reply_text("Couldn't parse. Try: 9-18")
+            return
+        sh, eh = result
+        if eh <= sh or sh < 0 or eh > 24:
+            await update.message.reply_text("Invalid range. Try: 9-18")
+            return
+        state.update({"start_hour": sh, "end_hour": eh, "step": "min_gap"})
+        await update.message.reply_text(
+            f"✅ {sh:02d}:00 – {eh:02d}:00 UTC\n\n"
+            f"Step 4/4: Minimum gap between posts?\n"
+            f"Examples:  90   (minutes)   2h   1h30m"
+        )
+
+    elif step == "min_gap":
+        gap = _parse_gap_minutes(text)
+        if gap is None or gap < 1:
+            await update.message.reply_text("Couldn't parse. Try: 90 or 2h")
+            return
+
+        n = state["posts_per_day"]
+        range_min = (state["end_hour"] - state["start_hour"]) * 60
+        required = (n - 1) * gap
+
+        if required >= range_min:
+            await update.message.reply_text(
+                f"⚠️ {n} posts × {gap}min gap needs {required}min, range is only {range_min}min.\n"
+                f"Reduce posts/day or gap, or widen the hour range.\n\n"
+                f"Step 2/4: How many posts per day?"
+            )
+            state["step"] = "posts_per_day"
+            return
+
+        state["min_gap_min"] = gap
+
+        # Build schedule
+        approved = get_approved_drafts()
+        pool = [d for d in approved if d["format"] in ("tweet", "thread")]
+        random.shuffle(pool)
+
+        start_d, end_d = state["start_date"], state["end_date"]
+        ppd = state["posts_per_day"]
+        days = (end_d - start_d).days + 1
+        total_needed = days * ppd
+        total_avail = len(pool)
+
+        schedule: list[tuple[int, datetime]] = []
+        remaining = list(pool)
+
+        for day_i in range(days):
+            if not remaining:
+                break
+            day = start_d + timedelta(days=day_i)
+            batch_size = min(ppd, len(remaining))
+            batch = remaining[:batch_size]
+            remaining = remaining[batch_size:]
+            times = _place_posts_random(batch_size, day, state["start_hour"], state["end_hour"], gap)
+            for draft, dt in zip(batch, times):
+                schedule.append((draft["id"], dt))
+
+        state.update({"schedule": schedule, "step": "confirm"})
+
+        # Preview
+        lines = [f"📅 Schedule preview — {len(schedule)} posts:"]
+        if total_avail < total_needed:
+            lines.append(f"⚠️ Queue has {total_avail} posts, needed {total_needed} — some days will have fewer")
+
+        by_day: dict[str, list[str]] = {}
+        for _, dt in schedule:
+            key = dt.strftime("%a %d %b")
+            by_day.setdefault(key, []).append(dt.strftime("%H:%M"))
+
+        shown = 0
+        for day_label, times_list in by_day.items():
+            lines.append(f"• {day_label}: {', '.join(times_list)}")
+            shown += 1
+            if shown >= 7:
+                rest = len(by_day) - 7
+                if rest > 0:
+                    lines.append(f"  … and {rest} more days")
+                break
+
+        lines.append("\nConfirm?")
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Schedule all", callback_data="asched_yes"),
+            InlineKeyboardButton("❌ Cancel",       callback_data="asched_no"),
+        ]])
+        await update.message.reply_text("\n".join(lines), reply_markup=kb)
+
 
 async def cmd_uploads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/uploads [N] [subfolder] — list videos from uploads folder to post or transcribe."""
@@ -1235,6 +1515,18 @@ async def cmd_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Could not fetch video\\. Check the URL\\.", parse_mode="MarkdownV2")
         return
 
+    if has_tweets_job(video["youtube_id"]):
+        _pending_reprocess[update.effective_chat.id] = {"type": "youtube", "video": video}
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes, regenerate", callback_data="rproc_yes"),
+            InlineKeyboardButton("❌ Cancel",          callback_data="rproc_no"),
+        ]])
+        await update.message.reply_text(
+            f"⚠️ Already generated posts for:\n{video['title']}\n\nGenerate again?",
+            reply_markup=kb,
+        )
+        return
+
     await update.message.reply_text(
         f"📹 Processing: *{_esc(video['title'])}*",
         parse_mode="MarkdownV2",
@@ -1279,6 +1571,21 @@ async def cmd_processlocal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"❌ File not found: `{_esc(file_path)}`",
             parse_mode="MarkdownV2",
+        )
+        return
+
+    video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
+    if has_tweets_job(video_id):
+        _pending_reprocess[update.effective_chat.id] = {
+            "type": "local", "file_path": file_path, "title": title,
+        }
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes, regenerate", callback_data="rproc_yes"),
+            InlineKeyboardButton("❌ Cancel",          callback_data="rproc_no"),
+        ]])
+        await update.message.reply_text(
+            f"⚠️ Already generated posts for:\n{title}\n\nGenerate again?",
+            reply_markup=kb,
         )
         return
 
@@ -1849,6 +2156,7 @@ async def scheduled_post_job(context: ContextTypes.DEFAULT_TYPE):
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
+        BotCommand("autoschedule", "Distribute queue posts across a date range automatically"),
         BotCommand("check",        "Trigger daily YouTube channel check"),
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
@@ -1873,6 +2181,7 @@ def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("uploads",        cmd_uploads))
+    app.add_handler(CommandHandler("autoschedule",   cmd_autoschedule))
     app.add_handler(CommandHandler("check",         cmd_check))
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))

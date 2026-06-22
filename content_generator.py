@@ -16,7 +16,7 @@ two versions of each post.
 Rules for both versions:
 - NEVER use the em dash character —. It is the single most detectable AI writing tell. Replace with a period, comma, colon, or rewrite the sentence. This rule has no exceptions.
 - No generic motivational filler. Every post must deliver a specific, concrete idea.
-- Start every single tweet with one relevant emoji. For threads, add the emoji only to the first tweet — the rest have no emoji. Pick based on content, not randomly.
+- No emojis. Do not start tweets or threads with emojis.
 - Single tweet: sharp insight, memorable quote, or punchy one-liner. Max 280 chars.
 - Thread: an idea that earns depth (3 to 7 tweets). Each tweet must stand alone \
 but pull the reader to the next one.

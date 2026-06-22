@@ -304,6 +304,18 @@ def get_all_scheduled_drafts() -> list:
 
 # ── video_jobs ────────────────────────────────────────────────────────────────
 
+def has_tweets_job(youtube_id: str) -> bool:
+    """Return True if tweet posts were ever generated for this video."""
+    with _connect() as conn:
+        row = conn.execute("""
+            SELECT 1 FROM video_jobs vj
+            JOIN videos v ON vj.video_id = v.id
+            WHERE v.youtube_id = ? AND vj.job_type = 'tweets'
+            LIMIT 1
+        """, (youtube_id,)).fetchone()
+        return row is not None
+
+
 def log_video_job(video_id: int, job_type: str, draft_count: int = 0):
     """Record that a content generation job was run for a video."""
     with _connect() as conn:
