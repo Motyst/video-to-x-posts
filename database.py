@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from config import DB_PATH
 
@@ -48,6 +49,12 @@ def init_db():
                 job_type    TEXT NOT NULL,
                 ran_at      TEXT DEFAULT (datetime('now')),
                 draft_count INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS command_stats (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                command    TEXT NOT NULL,
+                used_at    TEXT DEFAULT (datetime('now'))
             );
         """)
     _migrate()
@@ -302,7 +309,46 @@ def get_all_scheduled_drafts() -> list:
         return [dict(r) for r in rows]
 
 
+def get_active_video_post_paths() -> dict[str, str]:
+    """Return {file_path: status} for video_post drafts not yet posted."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT content, status FROM drafts
+            WHERE format = 'video_post' AND status IN ('approved', 'scheduled')
+        """).fetchall()
+    result = {}
+    for row in rows:
+        try:
+            data = json.loads(row["content"])
+            path = data.get("path", "")
+            if path:
+                result[path] = row["status"]
+        except Exception:
+            pass
+    return result
+
+
 # ── video_jobs ────────────────────────────────────────────────────────────────
+
+def log_command(command: str):
+    """Record a command invocation for usage tracking."""
+    with _connect() as conn:
+        conn.execute("INSERT INTO command_stats (command) VALUES (?)", (command,))
+
+
+def get_command_stats() -> list[dict]:
+    """Return commands ranked by usage count, with last-used date."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT command,
+                   COUNT(*)       AS count,
+                   MAX(used_at)   AS last_used
+            FROM   command_stats
+            GROUP  BY command
+            ORDER  BY count DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
 
 def has_tweets_job(youtube_id: str) -> bool:
     """Return True if tweet posts were ever generated for this video."""

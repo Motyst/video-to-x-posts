@@ -38,8 +38,11 @@ from database import (
     get_processed_video_ids,
     get_recent_video_summaries,
     get_scheduled_drafts,
+    get_active_video_post_paths,
+    get_command_stats,
     has_tweets_job,
     init_db,
+    log_command,
     log_video_job,
     get_recent_promo_drafts,
     mark_draft_posted,
@@ -1186,7 +1189,7 @@ async def _list_uploads_dir(
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
-    subfolders = [] if subfolder else sorted(d for d in search_dir.iterdir() if d.is_dir())
+    subfolders = sorted(d for d in search_dir.iterdir() if d.is_dir())
 
     if not video_files and not subfolders:
         label = f"uploads/{subfolder}/" if subfolder else "uploads/"
@@ -1197,27 +1200,60 @@ async def _list_uploads_dir(
     _uploads_listing[chat_id] = [str(v) for v in batch]
 
     label = f"uploads/{subfolder}/" if subfolder else "uploads/"
-    header = f"📁 {label} — {len(batch)} video(s)"
-    if limit and len(video_files) > limit:
-        header += f" of {len(video_files)} total"
+
+    # Compute relative path from UPLOADS_DIR so subfolder buttons work at any depth
+    try:
+        rel_str = str(search_dir.relative_to(Path(UPLOADS_DIR)))
+        if rel_str == ".":
+            rel_str = ""
+    except ValueError:
+        rel_str = subfolder or ""
 
     if subfolders:
-        folder_buttons = [
-            [InlineKeyboardButton(f"📂 {d.name}", callback_data=f"ufolder_{d.name[:50]}")]
-            for d in subfolders[:10]
-        ]
+        total_in_subfolders = 0
+        for d in subfolders:
+            try:
+                total_in_subfolders += sum(
+                    1 for f in d.iterdir() if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
+                )
+            except Exception:
+                pass
+        if video_files:
+            header = f"📁 {label} — {len(batch)} video(s) + {len(subfolders)} subfolder(s)"
+        elif total_in_subfolders:
+            header = f"📁 {label} — {total_in_subfolders} video(s) inside {len(subfolders)} subfolder(s)"
+        else:
+            header = f"📁 {label} — {len(subfolders)} subfolder(s)"
+        folder_buttons = []
+        for d in subfolders[:10]:
+            sub_rel = f"{rel_str}/{d.name}" if rel_str else d.name
+            folder_buttons.append(
+                [InlineKeyboardButton(f"📂 {d.name}", callback_data=f"ufolder_{sub_rel[:55]}")]
+            )
         await context.bot.send_message(
             chat_id=chat_id,
-            text=header + ("\n\n📂 Subfolders — tap to browse:" if subfolders else ""),
+            text=header + "\n\n📂 Tap a folder to browse:",
             reply_markup=InlineKeyboardMarkup(folder_buttons),
         )
     else:
+        header = f"📁 {label} — {len(batch)} video(s)"
+        if limit and len(video_files) > limit:
+            header += f" of {len(video_files)} total"
         await context.bot.send_message(chat_id=chat_id, text=header)
+
+    active_video_posts = get_active_video_post_paths()
 
     for idx, vpath in enumerate(batch):
         p = Path(vpath)
         size_mb = p.stat().st_size / (1024 * 1024)
-        text = f"🎬 {p.name}\n📦 {size_mb:.1f} MB"
+        status = active_video_posts.get(vpath) or active_video_posts.get(str(p.resolve()))
+        if status == "scheduled":
+            status_line = "\n⏰ Already scheduled"
+        elif status == "approved":
+            status_line = "\n📬 Already in queue"
+        else:
+            status_line = ""
+        text = f"🎬 {p.name}\n📦 {size_mb:.1f} MB{status_line}"
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📹 Post video",     callback_data=f"upost_{idx}"),
             InlineKeyboardButton("📝 Extract tweets", callback_data=f"utran_{idx}"),
@@ -1495,6 +1531,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dur_str = "?"
 
         lines.append(f"  {source_icon} {v['title'][:38]}  {dur_str}  [{jobs_str}]")
+
+    stats = get_command_stats()
+    if stats:
+        total_uses = sum(s["count"] for s in stats)
+        lines += ["", f"Commands ({total_uses} total uses):"]
+        for s in stats:
+            last = s["last_used"][:10] if s["last_used"] else "never"
+            bar = "█" * min(s["count"], 20)
+            lines.append(f"  /{s['command']:<18} {s['count']:>4}×  {bar}  (last {last})")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -2153,6 +2198,13 @@ async def scheduled_post_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+async def _track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Passthrough handler (group 1) — logs every command invocation."""
+    if update.message and update.message.text:
+        cmd = update.message.text.split()[0].lstrip("/").split("@")[0].lower()
+        log_command(cmd)
+
+
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
@@ -2197,6 +2249,7 @@ def main():
     app.add_handler(CommandHandler("addexample",    cmd_addexample))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))
     app.add_handler(CommandHandler("status",        cmd_status))
+    app.add_handler(MessageHandler(filters.COMMAND, _track_command), group=1)
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(
         filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL,

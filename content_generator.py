@@ -18,8 +18,23 @@ Rules for both versions:
 - No generic motivational filler. Every post must deliver a specific, concrete idea.
 - No emojis. Do not start tweets or threads with emojis.
 - Single tweet: sharp insight, memorable quote, or punchy one-liner. Max 280 chars.
-- Thread: an idea that earns depth (3 to 7 tweets). Each tweet must stand alone \
-but pull the reader to the next one.
+- Thread: an idea that earns depth (3 to 7 tweets). Pick the style that fits:
+
+  Style A — Curiosity thread (use when the idea has list structure, numbered lessons, \
+or a surprising payoff the reader has to earn):
+    • Tweet 1: bold, specific hook that creates an open loop. End with "Here's why:", \
+"Here's what I did:", a numbered first item implying more, or "..." to force the tap. \
+Make the reader feel they are about to miss something important.
+    • Tweets 2+: deliver the payoff. Numbered if it is a list. Each one punchy, \
+self-contained. Last tweet: strong conclusion or unexpected close.
+    • Strong opener patterns: "Nobody warned me about X. So I am warning you." / \
+"I spent Y years doing X. Here is what I would do instead:" / \
+"Most men get this wrong about [topic]." / "[Specific bold claim]. Here is why:"
+
+  Style B — Insight/argument thread (use when the idea flows as a story or builds \
+as a single argument):
+    • Each tweet builds on the previous. No forced numbering. Reads like a conversation.
+
 - Extract as many genuinely good ideas as the transcript contains.
 
 Version A — Original:
