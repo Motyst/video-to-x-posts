@@ -421,6 +421,66 @@ def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
         return None
 
 
+REPLY_PROMPT = """\
+You are writing X (Twitter) reply drafts in David's exact voice for a dating and \
+relationships content creator.
+
+Goal: write 3 distinct reply options to the given comment or post. Replies should \
+boost engagement, show expertise, and make the reader want to follow David.
+
+Rules:
+- NEVER use the em dash character —. Replace with period, comma, colon, or rewrite.
+- No emojis.
+- Under 280 characters each.
+- Each reply must add genuine value — a new angle, specific insight, or a sharp \
+follow-up point. Never just agree or compliment.
+- Sound like David: direct, confident, grounded in real experience with dating and \
+relationships. No corporate language.
+- Vary the approach across the 3 options:
+    1. Add a sharp insight or counter-angle
+    2. Ask a thought-provoking follow-up question that invites conversation
+    3. Share a concrete observation or reframe
+
+Output: JSON array of exactly 3 strings — no explanation, no markdown.
+["reply 1", "reply 2", "reply 3"]
+"""
+
+
+def generate_reply_options(comment_text: str) -> list[str] | None:
+    """Generate 3 reply options for a comment or post. Returns list of 3 or None."""
+    good_posts = get_good_posts(limit=8)
+    few_shot = _build_few_shot_block(good_posts)
+
+    user_prompt = (
+        f"{few_shot}"
+        f"Comment/post to reply to:\n{comment_text}\n\n"
+        "Write 3 reply options. Return only the JSON array."
+    )
+
+    try:
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=500,
+            system=REPLY_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.error(f"Reply generation failed: {e}")
+        return None
+
+    raw = response.content[0].text.strip()
+    raw = _strip_code_fence(raw)
+
+    try:
+        replies = json.loads(raw)
+        if not isinstance(replies, list) or len(replies) < 3:
+            raise ValueError("Expected array of 3")
+        return [r.replace("—", ",").replace(" ,", ",") for r in replies[:3]]
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Invalid reply response: {e}\nRaw: {raw[:300]}")
+        return None
+
+
 def _build_few_shot_block(good_posts: list) -> str:
     if not good_posts:
         return ""

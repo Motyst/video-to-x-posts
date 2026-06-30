@@ -56,7 +56,7 @@ from database import (
 from twitter_poster import post_draft, post_reply, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
-from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions, rewrite_hook
+from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions, rewrite_hook, generate_reply_options
 from retrospective import run_retrospective
 
 logging.basicConfig(
@@ -85,6 +85,8 @@ _video_upload_mode: set[int] = set()
 _uploads_listing: dict[int, list[str]] = {}
 # chat_id → {draft_id, format, content, variants, video_title} for hook picker
 _pending_hook_picks: dict[int, dict] = {}
+# chat_id → list of 3 reply options awaiting selection
+_pending_reply_picks: dict[int, list[str]] = {}
 # chat_id → autoschedule setup state
 _pending_autoschedule: dict[int, dict] = {}
 # chat_id → {type, video/file info} awaiting reprocess confirmation
@@ -591,6 +593,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Step-by-step schedule builder (day → hour → minute)
     if query.data.startswith(("sbday_", "sbhr_", "sbmin_")):
         await _handle_sched_builder(query, context)
+        return
+
+    # Reply pick — rpick_{idx}
+    if query.data.startswith("rpick_"):
+        idx = int(query.data[len("rpick_"):])
+        chat_id = query.message.chat_id
+        options = _pending_reply_picks.pop(chat_id, None)
+        if not options or idx >= len(options):
+            await query.edit_message_text("Session expired. Run /reply again.")
+            return
+        chosen = options[idx]
+        await query.edit_message_text(query.message.text + f"\n\n✅ Reply #{idx + 1} selected — copy below:")
+        await context.bot.send_message(chat_id=chat_id, text=chosen)
         return
 
     # CTA reply — addcta_{draft_id} / ctaskip_{draft_id}
@@ -1558,6 +1573,43 @@ async def cmd_fetchtranscripts(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/reply <comment text> — draft 3 reply options in David's voice."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /reply <comment or post text>\n\n"
+            "Paste the comment you want to reply to and I'll draft 3 options."
+        )
+        return
+
+    comment_text = " ".join(context.args)
+    await update.message.reply_text("✍️ Drafting reply options...")
+
+    options = generate_reply_options(comment_text)
+    if not options:
+        await update.message.reply_text("⚠️ Could not generate replies. Try again.")
+        return
+
+    _pending_reply_picks[update.effective_chat.id] = options
+
+    text = (
+        f"💬 3 reply options:\n\n"
+        f"1️⃣  {options[0]}\n\n"
+        f"2️⃣  {options[1]}\n\n"
+        f"3️⃣  {options[2]}\n\n"
+        "Tap to get the full text:"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("1️⃣", callback_data="rpick_0"),
+        InlineKeyboardButton("2️⃣", callback_data="rpick_1"),
+        InlineKeyboardButton("3️⃣", callback_data="rpick_2"),
+    ]])
+    await update.message.reply_text(text, reply_markup=kb)
+
+
 async def cmd_addexample(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually add a post as a style example for future Claude calls."""
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
@@ -2299,6 +2351,7 @@ async def _post_init(app: Application):
         BotCommand("retrospective","Re-analyse archived transcripts with new examples"),
         BotCommand("autopost",     "Toggle X auto-posting on/off"),
         BotCommand("fetchtranscripts", "Download transcripts only — no Claude, no drafts"),
+        BotCommand("reply",        "Draft 3 reply options for a comment in David's voice"),
         BotCommand("addexample",   "Add a post as a style example for Claude"),
         BotCommand("status",       "Stats + recent video job history"),
     ])
@@ -2323,6 +2376,7 @@ def main():
     app.add_handler(CommandHandler("scheduled",     cmd_scheduled))
     app.add_handler(CommandHandler("autopost",      cmd_autopost))
     app.add_handler(CommandHandler("fetchtranscripts", cmd_fetchtranscripts))
+    app.add_handler(CommandHandler("reply",         cmd_reply))
     app.add_handler(CommandHandler("addexample",    cmd_addexample))
     app.add_handler(CommandHandler("retrospective", cmd_retrospective))
     app.add_handler(CommandHandler("status",        cmd_status))
