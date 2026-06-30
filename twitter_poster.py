@@ -95,6 +95,14 @@ def post_video_tweet(video_path: str, caption: str) -> str:
     return f"https://x.com/i/web/status/{tweet_id}"
 
 
+def post_reply(parent_tweet_id: str, content: str) -> str:
+    """Post a reply to an existing tweet. Returns URL."""
+    client = _client()
+    response = client.create_tweet(text=content, in_reply_to_tweet_id=parent_tweet_id)
+    tweet_id = response.data["id"]
+    return f"https://x.com/i/web/status/{tweet_id}"
+
+
 def post_draft(fmt: str, content: str) -> str:
     """Post a draft (tweet, thread, or video_post). Returns URL."""
     if fmt == "tweet":

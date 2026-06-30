@@ -43,6 +43,7 @@ from database import (
     has_tweets_job,
     init_db,
     log_command,
+    set_draft_cta,
     log_video_job,
     get_recent_promo_drafts,
     mark_draft_posted,
@@ -52,7 +53,7 @@ from database import (
     update_draft_status,
     upsert_video,
 )
-from twitter_poster import post_draft, twitter_configured
+from twitter_poster import post_draft, post_reply, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
 from transcript import get_transcript, transcribe_local_file
 from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions, rewrite_hook
@@ -90,6 +91,14 @@ _pending_autoschedule: dict[int, dict] = {}
 _pending_reprocess: dict[int, dict] = {}
 
 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.mp3', '.m4a', '.wav'}
+
+DEFAULT_VIDEO_CTA = (
+    "If this hit home, let's work on it together. "
+    "Book a free strategy call: davidmeessen.com"
+)
+
+# chat_id → draft_id awaiting CTA text input
+_pending_cta: dict[int, int] = {}
 
 # Runtime toggle — can be flipped via /autopost without restart
 _auto_post_enabled: bool = AUTO_POST
@@ -286,6 +295,13 @@ def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _cta_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Add CTA reply", callback_data=f"addcta_{draft_id}")],
+        [InlineKeyboardButton("⏭ Skip",           callback_data=f"ctaskip_{draft_id}")],
+    ])
+
+
 def _day_picker_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     today = date.today()
     rows = []
@@ -329,12 +345,17 @@ def _hour_picker_keyboard(draft_id: int) -> InlineKeyboardMarkup:
 
 def _minute_picker_keyboard(draft_id: int, selected_date: date, hour: int) -> InlineKeyboardMarkup:
     label = f"{selected_date.strftime('%d %b')} {hour:02d}:"
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"{label}00", callback_data=f"sbmin_{draft_id}_0"),
-        InlineKeyboardButton(f"{label}15", callback_data=f"sbmin_{draft_id}_15"),
-        InlineKeyboardButton(f"{label}30", callback_data=f"sbmin_{draft_id}_30"),
-        InlineKeyboardButton(f"{label}45", callback_data=f"sbmin_{draft_id}_45"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{label}00", callback_data=f"sbmin_{draft_id}_0"),
+            InlineKeyboardButton(f"{label}15", callback_data=f"sbmin_{draft_id}_15"),
+            InlineKeyboardButton(f"{label}30", callback_data=f"sbmin_{draft_id}_30"),
+            InlineKeyboardButton(f"{label}45", callback_data=f"sbmin_{draft_id}_45"),
+        ],
+        [
+            InlineKeyboardButton("🎲 Random minute", callback_data=f"sbmin_{draft_id}_r"),
+        ],
+    ])
 
 
 def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -572,6 +593,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_sched_builder(query, context)
         return
 
+    # CTA reply — addcta_{draft_id} / ctaskip_{draft_id}
+    if query.data.startswith("addcta_") or query.data.startswith("ctaskip_"):
+        prefix = "addcta_" if query.data.startswith("addcta_") else "ctaskip_"
+        draft_id = int(query.data[len(prefix):])
+        chat_id = query.message.chat_id
+        if prefix == "ctaskip_":
+            _pending_cta.pop(chat_id, None)
+            await query.edit_message_text(query.message.text + "\n\n⏭ No CTA reply added.")
+            return
+        _pending_cta[chat_id] = draft_id
+        await query.edit_message_text(
+            query.message.text + "\n\n💬 Default CTA:\n\n"
+            f"{DEFAULT_VIDEO_CTA}\n\n"
+            "Tap ✅ to use it, or type your own reply text:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Use default", callback_data=f"ctadef_{draft_id}"),
+                InlineKeyboardButton("❌ Cancel",      callback_data=f"ctaskip_{draft_id}"),
+            ]]),
+        )
+        return
+
+    if query.data.startswith("ctadef_"):
+        draft_id = int(query.data[len("ctadef_"):])
+        chat_id = query.message.chat_id
+        _pending_cta.pop(chat_id, None)
+        set_draft_cta(draft_id, DEFAULT_VIDEO_CTA)
+        await query.edit_message_text(query.message.text.split("\n\n💬")[0] + "\n\n✅ CTA reply saved.")
+        return
+
     # Uploads folder: subfolder navigation
     if query.data.startswith("ufolder_"):
         subfolder_name = query.data[len("ufolder_"):]
@@ -742,7 +792,7 @@ async def _handle_sched_builder(query, context):
     elif data.startswith("sbmin_"):
         _, draft_id_str, minute_str = data.split("_", 2)
         draft_id = int(draft_id_str)
-        minute = int(minute_str)
+        minute = random.randint(0, 59) if minute_str == "r" else int(minute_str)
         state = _sched_builder.pop(chat_id, None)
         if not state or state["draft_id"] != draft_id or "hour" not in state:
             await query.edit_message_text("Session expired. Tap schedule again.")
@@ -757,9 +807,12 @@ async def _handle_sched_builder(query, context):
             return
         set_draft_scheduled(draft_id, dt.strftime("%Y-%m-%d %H:%M:%S"))
         label = dt.strftime("%a %d %b at %H:%M UTC")
-        await query.edit_message_text(
-            query.message.text.split("\n\n📅")[0] + f"\n\n⏰ Scheduled for {label}",
-        )
+        base_text = query.message.text.split("\n\n📅")[0] + f"\n\n⏰ Scheduled for {label}"
+        sched_draft = get_draft_by_id(draft_id)
+        if sched_draft and sched_draft["format"] == "video_post":
+            await query.edit_message_text(base_text + "\n\nAdd a CTA reply tweet under the video?", reply_markup=_cta_keyboard(draft_id))
+        else:
+            await query.edit_message_text(base_text)
 
 
 # ── pair handlers ────────────────────────────────────────────────────────────
@@ -825,9 +878,11 @@ async def _handle_schedule_action(query, context, action: str, draft_id: int, dr
         else:
             set_draft_scheduled(draft_id, fire_at.strftime("%Y-%m-%d %H:%M:%S"))
             label = fire_at.strftime("%H:%M UTC")
-            await query.edit_message_text(
-                query.message.text + f"\n\n⏰ Scheduled for {label}"
-            )
+            base = query.message.text + f"\n\n⏰ Scheduled for {label}"
+            if draft["format"] == "video_post":
+                await query.edit_message_text(base + "\n\nAdd a CTA reply tweet under the video?", reply_markup=_cta_keyboard(draft_id))
+            else:
+                await query.edit_message_text(base)
 
     elif action == "sched_custom":
         await query.edit_message_text(
@@ -844,14 +899,28 @@ async def _handle_schedule_action(query, context, action: str, draft_id: int, dr
 async def _fire_post(app, draft_id: int, draft: dict):
     """Post to X immediately and update status."""
     try:
-        url = post_draft(draft["format"], draft["content"])
+        # Re-fetch to pick up cta_reply and any other late-set fields
+        fresh = get_draft_by_id(draft_id) or draft
+        url = post_draft(fresh["format"], fresh["content"])
         mark_draft_posted(draft_id, url)
-        # Clean up video file from server after successful post
-        if draft["format"] == "video_post":
+
+        # CTA reply for video posts
+        cta_text = fresh.get("cta_reply")
+        if fresh["format"] == "video_post" and cta_text:
             try:
-                Path(json.loads(draft["content"])["path"]).unlink(missing_ok=True)
+                tweet_id = url.rstrip("/").split("/")[-1]
+                post_reply(tweet_id, cta_text)
+            except Exception as e:
+                logger.error(f"CTA reply failed for {draft_id}: {e}")
+                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"⚠️ CTA reply failed: {e}")
+
+        # Clean up video file from server after successful post
+        if fresh["format"] == "video_post":
+            try:
+                Path(json.loads(fresh["content"])["path"]).unlink(missing_ok=True)
             except Exception:
                 pass
+
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=f"🚀 Posted!\n{url}",
@@ -953,6 +1022,14 @@ async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         set_draft_scheduled(draft_id, dt.strftime("%Y-%m-%d %H:%M:%S"))
         await update.message.reply_text(f"⏰ Scheduled for {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+        return
+
+    # CTA custom text input
+    if chat_id in _pending_cta:
+        draft_id = _pending_cta.pop(chat_id)
+        cta_text = update.message.text.strip()
+        set_draft_cta(draft_id, cta_text)
+        await update.message.reply_text(f"✅ CTA reply saved:\n\n{cta_text}")
         return
 
     # File title confirmation

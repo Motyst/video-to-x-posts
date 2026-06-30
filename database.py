@@ -69,6 +69,7 @@ def _migrate():
             ("version",          "TEXT"),      # 'original' | 'trend' | NULL (legacy)
             ("pair_id",          "INTEGER"),   # links original+trend drafts together
             ("trend_reason",     "TEXT"),      # Claude's explanation for trend version
+            ("cta_reply",        "TEXT"),      # optional CTA tweet posted as reply after video
         ]:
             try:
                 conn.execute(f"ALTER TABLE drafts ADD COLUMN {col} {definition}")
@@ -200,6 +201,15 @@ def set_draft_telegram_id(draft_id: int, telegram_message_id: int):
         conn.execute(
             "UPDATE drafts SET telegram_message_id=? WHERE id=?",
             (telegram_message_id, draft_id),
+        )
+
+
+def set_draft_cta(draft_id: int, cta_text: str):
+    """Store a CTA reply text on a video_post draft."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE drafts SET cta_reply=? WHERE id=?",
+            (cta_text, draft_id),
         )
 
 

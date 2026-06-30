@@ -17,7 +17,9 @@ Rules for both versions:
 - NEVER use the em dash character —. It is the single most detectable AI writing tell. Replace with a period, comma, colon, or rewrite the sentence. This rule has no exceptions.
 - No generic motivational filler. Every post must deliver a specific, concrete idea.
 - No emojis. Do not start tweets or threads with emojis.
-- Single tweet: sharp insight, memorable quote, or punchy one-liner. Max 280 chars.
+- Single tweet: sharp insight, memorable quote, or punchy one-liner. Max 280 chars. \
+Must be fully self-contained — no open questions, no cliffhangers, no "here's why", \
+no unanswered setups. If an idea needs a follow-up to make sense, it is a thread, not a tweet.
 - Thread: an idea that earns depth (3 to 7 tweets). Pick the style that fits:
 
   Style A — Curiosity thread (use when the idea has list structure, numbered lessons, \
