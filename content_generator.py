@@ -83,7 +83,9 @@ Rules:
 - No generic hype. Every line must be specific to what is actually in this video.
 - Title: under 100 chars, creates curiosity, makes the viewer feel they are missing something.
 - Hook: single opening line. Stops the scroll. Implies a payoff without giving it away.
-- Caption: 3 to 5 sentences. Tease the value, build tension, end with a soft CTA to watch.
+- Caption: 3 to 5 sentences. Tease the value, build tension, end with a soft CTA to watch. \
+Insert a line break (\\n\\n) after every 2-3 sentences so it reads as short paragraphs, \
+not one dense block.
 
 Version A — Original:
 - Match David's communication style exactly from the transcript.
@@ -211,6 +213,8 @@ Rules:
 - Write AS the speaker (first person) or directly to the viewer (second person).
 - Every caption must feel like this specific person wrote it — use their vocabulary, rhythm, energy.
 - No generic motivational filler. Every sentence must earn its place.
+- Formatting: for any caption with 3+ sentences, insert a line break (\\n\\n) after every \
+2-3 sentences so it reads as short paragraphs, not one dense block. Never output a wall of text.
 
 Caption 1 — Original (1-2 sentences, SHORT):
 Most faithful to exactly what was said. Use the speaker's own words and phrasing wherever possible.
@@ -220,11 +224,13 @@ Target a specific struggle that ambitious people face which this video addresses
 Create instant recognition ("that's me") without giving away the solution.
 
 Caption 3 — Key Lesson (3-4 sentences, LONGER):
-Extract the single most important insight. Build from setup to payoff. End with why it matters.
+Extract the single most important insight. Build from setup to payoff. End with why it matters. \
+Break into short paragraphs per the formatting rule above.
 
 Caption 4 — Hook (3-4 sentences, LONGER):
 A compelling hook that would stop the scroll. Any angle — story, contrast, bold claim, \
-unexpected truth — as long as it is grounded in this video's content.
+unexpected truth — as long as it is grounded in this video's content. \
+Break into short paragraphs per the formatting rule above.
 
 Output: JSON object only — no explanation, no markdown wrapper.
 Schema:

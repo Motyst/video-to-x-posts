@@ -1,10 +1,27 @@
 import logging
+import subprocess
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from config import TRANSCRIPTS_DIR, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_MODEL, YOUTUBE_COOKIES_FILE
 
 logger = logging.getLogger(__name__)
+
+
+def get_media_duration(file_path: str) -> int | None:
+    """Return duration in whole seconds via ffprobe, without transcribing. None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", file_path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        return int(float(result.stdout.strip()))
+    except Exception as e:
+        logger.warning(f"ffprobe duration check failed for {file_path}: {e}")
+        return None
 
 
 def get_transcript(youtube_id: str, title: str) -> str | None:

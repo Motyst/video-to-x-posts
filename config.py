@@ -32,3 +32,7 @@ TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
 TWITTER_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TWITTER_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_SECRET", "")
 AUTO_POST = os.getenv("AUTO_POST", "false").lower() == "true"
+
+# X video upload cap in seconds — 120 for accounts without X Premium.
+# Set to 0 to disable the check (e.g. once the account has Premium).
+MAX_VIDEO_SECONDS = int(os.getenv("MAX_VIDEO_SECONDS", "120"))

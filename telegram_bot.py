@@ -55,7 +55,7 @@ from database import (
 )
 from twitter_poster import post_draft, post_reply, twitter_configured
 from youtube_monitor import fetch_single_video, get_new_videos, get_unprocessed_videos
-from transcript import get_transcript, transcribe_local_file
+from transcript import get_transcript, transcribe_local_file, get_media_duration
 from content_generator import generate_posts, generate_promo, generate_article, format_article_for_output, generate_video_post_captions, rewrite_hook, generate_reply_options
 from retrospective import run_retrospective
 
@@ -1835,6 +1835,20 @@ async def _generate_video_captions(bot, chat_id: int, file_path: str):
     """Transcribe video, generate promo captions, show as selection buttons."""
     title = Path(file_path).stem
     video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
+
+    if config.MAX_VIDEO_SECONDS:
+        duration = get_media_duration(file_path)
+        if duration and duration > config.MAX_VIDEO_SECONDS:
+            mins, secs = divmod(duration, 60)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ {title} is {mins}m{secs:02d}s — X blocks video uploads over "
+                    f"{config.MAX_VIDEO_SECONDS // 60} min without X Premium.\n\n"
+                    "Trim the video, or upgrade the account to X Premium and it'll go through."
+                ),
+            )
+            return
 
     await bot.send_message(chat_id=chat_id, text=f"🎬 Transcribing: {title}\nThis may take a while...")
 
