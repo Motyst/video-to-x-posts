@@ -241,7 +241,7 @@ def get_approved_drafts() -> list:
     """All approved drafts not yet marked as posted, with their video title."""
     with _connect() as conn:
         rows = conn.execute("""
-            SELECT d.id, d.format, d.content, d.updated_at,
+            SELECT d.id, d.format, d.content, d.created_at, d.updated_at,
                    COALESCE(v.title, '(no video)') AS title
             FROM   drafts d
             LEFT JOIN videos v ON v.id = d.video_id

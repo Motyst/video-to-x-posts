@@ -1105,6 +1105,27 @@ async def cmd_autoschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_autoschedulevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/autoschedulevideo — distribute approved video posts across a date range, oldest first."""
+    if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    approved = get_approved_drafts()
+    schedulable = [d for d in approved if d["format"] == "video_post"]
+
+    if not schedulable:
+        await update.message.reply_text("No approved video posts to schedule. Approve one via /uploads first.")
+        return
+
+    _pending_autoschedule[update.effective_chat.id] = {"step": "date_range", "kind": "video"}
+    await update.message.reply_text(
+        f"📅 Video autoschedule setup\n\n"
+        f"Queue has {len(schedulable)} video post(s) — will be scheduled oldest first.\n\n"
+        f"Step 1/4: Date range?\n"
+        f"Examples:  22 Jun - 30 Jun   or   2026-06-22 to 2026-06-30"
+    )
+
+
 async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     state = _pending_autoschedule.get(chat_id)
@@ -1184,9 +1205,14 @@ async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAUL
         state["min_gap_min"] = gap
 
         # Build schedule
+        kind = state.get("kind", "text")
         approved = get_approved_drafts()
-        pool = [d for d in approved if d["format"] in ("tweet", "thread")]
-        random.shuffle(pool)
+        if kind == "video":
+            pool = [d for d in approved if d["format"] == "video_post"]
+            pool.sort(key=lambda d: d["created_at"])  # oldest first — matches release order
+        else:
+            pool = [d for d in approved if d["format"] in ("tweet", "thread")]
+            random.shuffle(pool)
 
         start_d, end_d = state["start_date"], state["end_date"]
         ppd = state["posts_per_day"]
@@ -2352,6 +2378,7 @@ async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
         BotCommand("autoschedule", "Distribute queue posts across a date range automatically"),
+        BotCommand("autoschedulevideo", "Distribute approved video posts across a date range, oldest first"),
         BotCommand("check",        "Trigger daily YouTube channel check"),
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
@@ -2378,6 +2405,7 @@ def main():
 
     app.add_handler(CommandHandler("uploads",        cmd_uploads))
     app.add_handler(CommandHandler("autoschedule",   cmd_autoschedule))
+    app.add_handler(CommandHandler("autoschedulevideo", cmd_autoschedulevideo))
     app.add_handler(CommandHandler("check",         cmd_check))
     app.add_handler(CommandHandler("process",       cmd_process))
     app.add_handler(CommandHandler("processall",    cmd_processall))
