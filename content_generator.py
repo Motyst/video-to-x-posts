@@ -7,6 +7,15 @@ from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ARTICLE_TARGET_WORDS, ARTICL
 logger = logging.getLogger(__name__)
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
+
+def _extract_text(response) -> str:
+    """Get the text block from a Claude response, skipping ThinkingBlocks etc."""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text.strip()
+    return ""
+
+
 SYSTEM_PROMPT = """\
 You are a social media content creator for David's X (Twitter) account.
 
@@ -184,7 +193,7 @@ def generate_article(youtube_id: str, title: str, transcript: str) -> dict | Non
         logger.error(f"Article generation failed for {youtube_id}: {e}")
         return None
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:
@@ -265,7 +274,7 @@ def generate_video_post_captions(video_id: str, title: str, transcript: str) -> 
         logger.error(f"Video caption generation failed for {video_id}: {e}")
         return None
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:
@@ -300,7 +309,7 @@ def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:
@@ -335,7 +344,7 @@ def generate_posts(youtube_id: str, title: str, transcript: str) -> list:
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:
@@ -414,7 +423,7 @@ def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
         logger.error(f"Hook rewrite failed: {e}")
         return None
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:
@@ -474,7 +483,7 @@ def generate_reply_options(comment_text: str) -> list[str] | None:
         logger.error(f"Reply generation failed: {e}")
         return None
 
-    raw = response.content[0].text.strip()
+    raw = _extract_text(response)
     raw = _strip_code_fence(raw)
 
     try:

@@ -1106,7 +1106,10 @@ async def cmd_autoschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_autoschedulevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/autoschedulevideo — distribute approved video posts across a date range, oldest first."""
+    """/autoschedulevideo [random] — distribute approved video posts across a date range.
+
+    Default order: oldest first. Pass "random" to shuffle instead.
+    """
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
 
@@ -1117,10 +1120,14 @@ async def cmd_autoschedulevideo(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("No approved video posts to schedule. Approve one via /uploads first.")
         return
 
-    _pending_autoschedule[update.effective_chat.id] = {"step": "date_range", "kind": "video"}
+    order = "random" if context.args and context.args[0].lower() == "random" else "oldest"
+    order_label = "randomly" if order == "random" else "oldest first"
+
+    _pending_autoschedule[update.effective_chat.id] = {"step": "date_range", "kind": "video", "order": order}
     await update.message.reply_text(
         f"📅 Video autoschedule setup\n\n"
-        f"Queue has {len(schedulable)} video post(s) — will be scheduled oldest first.\n\n"
+        f"Queue has {len(schedulable)} video post(s) — will be scheduled {order_label}.\n"
+        f"(Use /autoschedulevideo random to shuffle order, or /autoschedulevideo for oldest first.)\n\n"
         f"Step 1/4: Date range?\n"
         f"Examples:  22 Jun - 30 Jun   or   2026-06-22 to 2026-06-30"
     )
@@ -1209,7 +1216,10 @@ async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAUL
         approved = get_approved_drafts()
         if kind == "video":
             pool = [d for d in approved if d["format"] == "video_post"]
-            pool.sort(key=lambda d: d["created_at"])  # oldest first — matches release order
+            if state.get("order") == "random":
+                random.shuffle(pool)
+            else:
+                pool.sort(key=lambda d: d["created_at"])  # oldest first — matches release order
         else:
             pool = [d for d in approved if d["format"] in ("tweet", "thread")]
             random.shuffle(pool)
@@ -1343,7 +1353,7 @@ async def _list_uploads_dir(
         else:
             header = f"📁 {label} — {len(subfolders)} subfolder(s)"
         folder_buttons = []
-        for d in subfolders[:10]:
+        for d in subfolders:
             sub_rel = f"{rel_str}/{d.name}" if rel_str else d.name
             folder_buttons.append(
                 [InlineKeyboardButton(f"📂 {d.name}", callback_data=f"ufolder_{sub_rel[:55]}")]
@@ -1436,9 +1446,10 @@ async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         delta = fire - now
         if delta.total_seconds() < 3600:
             return f"in {int(delta.total_seconds() // 60)}m"
-        if delta.days == 0:
+        day_diff = (fire.date() - now.date()).days
+        if day_diff == 0:
             return fire.strftime("today %H:%M UTC")
-        if delta.days == 1:
+        if day_diff == 1:
             return fire.strftime("tomorrow %H:%M UTC")
         return fire.strftime("%b %d %H:%M UTC")
 
@@ -2378,7 +2389,7 @@ async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
         BotCommand("autoschedule", "Distribute queue posts across a date range automatically"),
-        BotCommand("autoschedulevideo", "Distribute approved video posts across a date range, oldest first"),
+        BotCommand("autoschedulevideo", "Distribute approved video posts — oldest first, or 'random' for shuffle"),
         BotCommand("check",        "Trigger daily YouTube channel check"),
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
