@@ -182,9 +182,14 @@ def get_draft_by_id(draft_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def update_draft_status(draft_id: int, status: str, content: str = None):
+def update_draft_status(draft_id: int, status: str, content: str = None, format: str = None):
     with _connect() as conn:
-        if content is not None:
+        if content is not None and format is not None:
+            conn.execute(
+                "UPDATE drafts SET status=?, content=?, format=?, updated_at=datetime('now') WHERE id=?",
+                (status, content, format, draft_id),
+            )
+        elif content is not None:
             conn.execute(
                 "UPDATE drafts SET status=?, content=?, updated_at=datetime('now') WHERE id=?",
                 (status, content, draft_id),

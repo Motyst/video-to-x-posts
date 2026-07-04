@@ -277,12 +277,18 @@ def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎣 Rewrite hook", callback_data=f"hook_{draft_id}")]
         if fmt in ("tweet", "thread") else None
     )
+    edit_row = (
+        [InlineKeyboardButton("✏️ Edit text", callback_data=f"edit_{draft_id}")]
+        if fmt in ("tweet", "thread") else None
+    )
     posted_row = [InlineKeyboardButton("✅ Mark as posted", callback_data=f"posted_{draft_id}")]
 
     if fmt == "promo" or not twitter_configured():
         rows = [posted_row]
         if hook_row:
             rows.insert(0, hook_row)
+        if edit_row:
+            rows.insert(0, edit_row)
         return InlineKeyboardMarkup(rows)
 
     rows = [
@@ -294,6 +300,8 @@ def _queue_keyboard(draft_id: int, fmt: str = None) -> InlineKeyboardMarkup:
     ]
     if hook_row:
         rows.insert(1, hook_row)
+    if edit_row:
+        rows.insert(1, edit_row)
     return InlineKeyboardMarkup(rows)
 
 
@@ -593,6 +601,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Step-by-step schedule builder (day → hour → minute)
     if query.data.startswith(("sbday_", "sbhr_", "sbmin_")):
         await _handle_sched_builder(query, context)
+        return
+
+    # Queue pagination — qpage_{offset}
+    if query.data.startswith("qpage_"):
+        offset = int(query.data[len("qpage_"):])
+        await _send_queue_page(context.bot, query.message.chat_id, offset, edit_query=query)
+        return
+
+    # Scheduled list pagination — spage_{offset}
+    if query.data.startswith("spage_"):
+        offset = int(query.data[len("spage_"):])
+        await _send_scheduled_page(context.bot, query.message.chat_id, offset, edit_query=query)
         return
 
     # Reply pick — rpick_{idx}
@@ -1077,7 +1097,7 @@ async def on_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_fmt = "tweet"
         new_content = raw
 
-    update_draft_status(draft_id, "approved", new_content)
+    update_draft_status(draft_id, "approved", new_content, new_fmt)
     add_good_post(draft_id, new_fmt, new_content)
     await update.message.reply_text("✅ Saved edited version and added to style examples\\.", parse_mode="MarkdownV2")
 
@@ -1412,94 +1432,114 @@ async def cmd_retrospective(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Retrospective done. {count} new idea pairs created.")
 
 
+def _sched_preview(d: dict) -> str:
+    fmt, content = d["format"], d["content"]
+    if fmt == "tweet":
+        text = content
+    elif fmt == "thread":
+        tweets = json.loads(content)
+        text = tweets[0] if tweets else content
+    elif fmt == "promo":
+        data = json.loads(content)
+        text = data.get("hook") or data.get("title") or content
+    else:
+        text = content
+    text = text.strip()
+    return (text[:50].rstrip() + "…") if len(text) > 50 else text
+
+
+def _sched_fire_time(d: dict) -> datetime:
+    return datetime.strptime(d["scheduled_for"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def _sched_time_str(fire: datetime, now: datetime) -> str:
+    delta = fire - now
+    if delta.total_seconds() < 3600:
+        return f"in {int(delta.total_seconds() // 60)}m"
+    day_diff = (fire.date() - now.date()).days
+    if day_diff == 0:
+        return fire.strftime("today %H:%M UTC")
+    if day_diff == 1:
+        return fire.strftime("tomorrow %H:%M UTC")
+    return fire.strftime("%b %d %H:%M UTC")
+
+
+def _sched_icon(fmt: str) -> str:
+    return "📝" if fmt == "tweet" else ("🧵" if fmt == "thread" else "🎬")
+
+
 async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/scheduled — list all posts queued for auto-posting with time and preview."""
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
+    await _send_scheduled_page(context.bot, update.effective_chat.id, 0)
 
+
+async def _send_scheduled_page(bot, chat_id: int, offset: int, edit_query=None):
+    """Show overdue posts (once, at offset 0) then upcoming posts 10 at a time."""
     drafts = get_all_scheduled_drafts()
     if not drafts:
-        await update.message.reply_text("No posts scheduled.")
+        text = "No posts scheduled."
+        if edit_query:
+            await edit_query.edit_message_text(text)
+        else:
+            await bot.send_message(chat_id=chat_id, text=text)
         return
 
     now = datetime.now(timezone.utc)
+    overdue  = [d for d in drafts if _sched_fire_time(d) <= now]
+    upcoming = [d for d in drafts if _sched_fire_time(d) > now]
 
-    def _preview(d: dict) -> str:
-        fmt, content = d["format"], d["content"]
-        if fmt == "tweet":
-            text = content
-        elif fmt == "thread":
-            tweets = json.loads(content)
-            text = tweets[0] if tweets else content
-        elif fmt == "promo":
-            data = json.loads(content)
-            text = data.get("hook") or data.get("title") or content
-        else:
-            text = content
-        text = text.strip()
-        return (text[:50].rstrip() + "…") if len(text) > 50 else text
-
-    def _fire_time(d: dict) -> datetime:
-        return datetime.strptime(d["scheduled_for"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-
-    def _time_str(fire: datetime) -> str:
-        delta = fire - now
-        if delta.total_seconds() < 3600:
-            return f"in {int(delta.total_seconds() // 60)}m"
-        day_diff = (fire.date() - now.date()).days
-        if day_diff == 0:
-            return fire.strftime("today %H:%M UTC")
-        if day_diff == 1:
-            return fire.strftime("tomorrow %H:%M UTC")
-        return fire.strftime("%b %d %H:%M UTC")
-
-    icon = lambda fmt: "📝" if fmt == "tweet" else ("🧵" if fmt == "thread" else "🎬")
-
-    overdue  = [d for d in drafts if _fire_time(d) <= now]
-    upcoming = [d for d in drafts if _fire_time(d) > now]
-
-    lines = []
-
-    if overdue:
-        await update.message.reply_text(
-            f"⚠️ {len(overdue)} overdue (not posted). Choose action for each:"
+    if offset == 0 and overdue:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ {len(overdue)} overdue (not posted). Choose action for each:",
         )
         for d in overdue:
-            fire = _fire_time(d)
+            fire = _sched_fire_time(d)
             text = (
                 f"📌 {d['title']}\n"
                 f"Was due: {fire.strftime('%b %d %H:%M UTC')}\n\n"
-                f"{_preview(d)}"
+                f"{_sched_preview(d)}"
             )
             # Reset to approved so queue keyboard actions work correctly
             update_draft_status(d["id"], "approved")
-            await context.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
+            await bot.send_message(
+                chat_id=chat_id,
                 text=text,
                 reply_markup=_queue_keyboard(d["id"], fmt=d["format"]),
             )
 
-    if upcoming:
-        await context.bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=f"⏰ {len(upcoming)} upcoming scheduled:",
+    if not upcoming:
+        if offset == 0 and not overdue:
+            await bot.send_message(chat_id=chat_id, text="Nothing scheduled.")
+        return
+
+    total = len(upcoming)
+    batch = upcoming[offset:offset + _PAGE_SIZE]
+    header = f"⏰ {total} upcoming scheduled — showing {offset + 1}-{offset + len(batch)}:"
+
+    if edit_query:
+        await edit_query.edit_message_text(header)
+    else:
+        await bot.send_message(chat_id=chat_id, text=header)
+
+    for d in batch:
+        fire = _sched_fire_time(d)
+        text = (
+            f"{_sched_icon(d['format'])} {_sched_time_str(fire, now)}  •  {d['title']}\n\n"
+            f"{_sched_preview(d)}"
         )
-        for d in upcoming:
-            fire = _fire_time(d)
-            text = (
-                f"{icon(d['format'])} {_time_str(fire)}  •  {d['title']}\n\n"
-                f"{_preview(d)}"
-            )
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Unschedule", callback_data=f"unschedule_{d['id']}"),
-            ]])
-            await context.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                reply_markup=kb,
-            )
-    if not overdue and not upcoming:
-        await update.message.reply_text("Nothing scheduled.")
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Unschedule", callback_data=f"unschedule_{d['id']}"),
+        ]])
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+    if offset + _PAGE_SIZE < total:
+        next_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Next 10 ▶️", callback_data=f"spage_{offset + _PAGE_SIZE}"),
+        ]])
+        await bot.send_message(chat_id=chat_id, text="More scheduled below.", reply_markup=next_kb)
 
 
 async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2079,24 +2119,49 @@ async def cmd_promolocal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _process_promo_local_file(context.application, file_path, title)
 
 
+_PAGE_SIZE = 10
+
+
 async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all approved posts ready to copy-paste."""
+    """Show approved posts ready to publish, 10 at a time."""
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
+    await _send_queue_page(context.bot, update.effective_chat.id, 0)
 
+
+async def _send_queue_page(bot, chat_id: int, offset: int, edit_query=None):
     approved = get_approved_drafts()
+    total = len(approved)
+
     if not approved:
-        await update.message.reply_text("Queue is empty — no approved posts yet.")
+        text = "Queue is empty — no approved posts yet."
+        if edit_query:
+            await edit_query.edit_message_text(text)
+        else:
+            await bot.send_message(chat_id=chat_id, text=text)
         return
 
-    await update.message.reply_text(f"📬 {len(approved)} post(s) ready to publish:")
-    for draft in approved:
+    batch = approved[offset:offset + _PAGE_SIZE]
+    header = f"📬 {total} post(s) ready to publish — showing {offset + 1}-{offset + len(batch)}:"
+
+    if edit_query:
+        await edit_query.edit_message_text(header)
+    else:
+        await bot.send_message(chat_id=chat_id, text=header)
+
+    for draft in batch:
         text = _format_queue_item(draft)
-        await context.bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
+        await bot.send_message(
+            chat_id=chat_id,
             text=text,
             reply_markup=_queue_keyboard(draft["id"], fmt=draft["format"]),
         )
+
+    if offset + _PAGE_SIZE < total:
+        next_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Next 10 ▶️", callback_data=f"qpage_{offset + _PAGE_SIZE}"),
+        ]])
+        await bot.send_message(chat_id=chat_id, text="More posts below.", reply_markup=next_kb)
 
 
 def _format_queue_item(draft: dict) -> str:
