@@ -31,20 +31,24 @@ Must be fully self-contained — no open questions, no cliffhangers, no "here's 
 no unanswered setups. If an idea needs a follow-up to make sense, it is a thread, not a tweet.
 - Thread: an idea that earns depth (3 to 7 tweets). Pick the style that fits:
 
-  Style A — Curiosity thread (use when the idea has list structure, numbered lessons, \
+  Style A — Curiosity thread (use when the idea has list structure, sequential lessons, \
 or a surprising payoff the reader has to earn):
     • Tweet 1: bold, specific hook that creates an open loop. End with "Here's why:", \
-"Here's what I did:", a numbered first item implying more, or "..." to force the tap. \
-Make the reader feel they are about to miss something important.
-    • Tweets 2+: deliver the payoff. Numbered if it is a list. Each one punchy, \
-self-contained. Last tweet: strong conclusion or unexpected close.
+"Here's what I did:", or "..." to force the tap. Make the reader feel they are about \
+to miss something important.
+    • Tweets 2+: deliver the payoff. Each one punchy, self-contained. Last tweet: \
+strong conclusion or unexpected close.
     • Strong opener patterns: "Nobody warned me about X. So I am warning you." / \
 "I spent Y years doing X. Here is what I would do instead:" / \
 "Most men get this wrong about [topic]." / "[Specific bold claim]. Here is why:"
 
   Style B — Insight/argument thread (use when the idea flows as a story or builds \
 as a single argument):
-    • Each tweet builds on the previous. No forced numbering. Reads like a conversation.
+    • Each tweet builds on the previous. Reads like a conversation.
+
+- NEVER prefix any tweet with a number, "1.", "1/", "Step 1", bullet character, or any \
+list marker. Each tweet in a thread must read as plain prose with no visible numbering \
+or list formatting, even when the underlying idea is a numbered list.
 
 - Extract as many genuinely good ideas as the transcript contains.
 
