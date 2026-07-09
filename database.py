@@ -242,6 +242,27 @@ def count_good_posts() -> int:
         return conn.execute("SELECT COUNT(*) FROM good_posts").fetchone()[0]
 
 
+def count_drafts_by_kind() -> dict:
+    """Counts of queued (approved) and scheduled drafts, split video vs text.
+
+    Returns {'queue_video': n, 'queue_text': n, 'scheduled_video': n, 'scheduled_text': n}.
+    """
+    counts = {"queue_video": 0, "queue_text": 0, "scheduled_video": 0, "scheduled_text": 0}
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT status,
+                   CASE WHEN format = 'video_post' THEN 'video' ELSE 'text' END AS kind,
+                   COUNT(*) AS n
+            FROM   drafts
+            WHERE  status IN ('approved', 'scheduled')
+            GROUP  BY status, kind
+        """).fetchall()
+    for r in rows:
+        prefix = "queue" if r["status"] == "approved" else "scheduled"
+        counts[f"{prefix}_{r['kind']}"] = r["n"]
+    return counts
+
+
 def get_approved_drafts() -> list:
     """All approved drafts not yet marked as posted, with their video title."""
     with _connect() as conn:

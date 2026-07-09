@@ -32,6 +32,7 @@ from database import (
     add_draft,
     add_draft_pair,
     add_good_post,
+    count_drafts_by_kind,
     count_good_posts,
     get_all_scheduled_drafts,
     get_approved_drafts,
@@ -1739,13 +1740,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     n_videos = len(get_processed_video_ids())
     n_posts = count_good_posts()
-    n_queue = len(get_approved_drafts())
+    kinds = count_drafts_by_kind()
+    n_queue = kinds["queue_text"] + kinds["queue_video"]
+    n_sched = kinds["scheduled_text"] + kinds["scheduled_video"]
 
     lines = [
         f"📊 Stats\n",
         f"• Videos processed: {n_videos}",
         f"• Approved posts (style examples): {n_posts}",
-        f"• Ready to post (queue): {n_queue}",
+        f"• Queue: {n_queue} (📝 {kinds['queue_text']} text, 🎬 {kinds['queue_video']} video)",
+        f"• Scheduled: {n_sched} (📝 {kinds['scheduled_text']} text, 🎬 {kinds['scheduled_video']} video)",
         "",
         "Recent videos:",
     ]
