@@ -201,7 +201,7 @@ def generate_article(youtube_id: str, title: str, transcript: str) -> dict | Non
     raw = _strip_code_fence(raw)
 
     try:
-        article = json.loads(raw)
+        article = _loads_lenient(raw)
         if not isinstance(article, dict):
             raise ValueError("Expected JSON object")
         # strip em dashes from all fields
@@ -282,7 +282,7 @@ def generate_video_post_captions(video_id: str, title: str, transcript: str) -> 
     raw = _strip_code_fence(raw)
 
     try:
-        result = json.loads(raw)
+        result = _loads_lenient(raw)
         if not isinstance(result, dict):
             raise ValueError("Expected JSON object")
         return {
@@ -317,7 +317,7 @@ def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:
     raw = _strip_code_fence(raw)
 
     try:
-        promo = json.loads(raw)
+        promo = _loads_lenient(raw)
         if not isinstance(promo, dict):
             raise ValueError("Expected a JSON object")
         return {
@@ -352,7 +352,7 @@ def generate_posts(youtube_id: str, title: str, transcript: str) -> list:
     raw = _strip_code_fence(raw)
 
     try:
-        ideas = json.loads(raw)
+        ideas = _loads_lenient(raw)
         if not isinstance(ideas, list):
             raise ValueError("Expected a JSON array")
         return [_clean_idea(idea) for idea in ideas]
@@ -371,6 +371,44 @@ def _clean_idea(idea: dict) -> dict:
         return v
 
     return {k: clean(v) for k, v in idea.items()}
+
+
+def _loads_lenient(raw: str):
+    """json.loads with a fallback for unescaped quotes inside string values.
+
+    The model occasionally writes dialogue quotes verbatim inside a JSON
+    string ('the "no big deal" excuse'), which breaks strict parsing. On
+    failure, re-scan treating a quote inside a string as the closer only
+    when the next non-whitespace char is JSON structure; escape the rest.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    out = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(raw):
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+        elif escaped:
+            escaped = False
+            out.append(ch)
+        elif ch == "\\":
+            escaped = True
+            out.append(ch)
+        elif ch == '"':
+            nxt = next((c for c in raw[i + 1:] if not c.isspace()), "")
+            if nxt in ',}]:' or nxt == "":
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+        else:
+            out.append(ch)
+    return json.loads("".join(out))
 
 
 def _strip_code_fence(text: str) -> str:
@@ -431,7 +469,7 @@ def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
     raw = _strip_code_fence(raw)
 
     try:
-        variants = json.loads(raw)
+        variants = _loads_lenient(raw)
         if not isinstance(variants, list) or len(variants) < 3:
             raise ValueError("Expected array of 3")
         return [v.replace("—", ",").replace(" ,", ",") for v in variants[:3]]
@@ -491,7 +529,7 @@ def generate_reply_options(comment_text: str) -> list[str] | None:
     raw = _strip_code_fence(raw)
 
     try:
-        replies = json.loads(raw)
+        replies = _loads_lenient(raw)
         if not isinstance(replies, list) or len(replies) < 3:
             raise ValueError("Expected array of 3")
         return [r.replace("—", ",").replace(" ,", ",") for r in replies[:3]]
