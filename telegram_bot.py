@@ -1160,9 +1160,9 @@ async def cmd_autoschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_autoschedulevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/autoschedulevideo [random] — distribute approved video posts across a date range.
+    """/autoschedulevideo [oldest] — distribute approved video posts across a date range.
 
-    Default order: oldest first. Pass "random" to shuffle instead.
+    Default order: random shuffle (same as text autoschedule). Pass "oldest" for oldest first.
     """
     if str(update.effective_chat.id) != str(TELEGRAM_CHAT_ID):
         return
@@ -1174,14 +1174,14 @@ async def cmd_autoschedulevideo(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("No approved video posts to schedule. Approve one via /uploads first.")
         return
 
-    order = "random" if context.args and context.args[0].lower() == "random" else "oldest"
-    order_label = "randomly" if order == "random" else "oldest first"
+    order = "oldest" if context.args and context.args[0].lower() == "oldest" else "random"
+    order_label = "oldest first" if order == "oldest" else "randomly"
 
     _pending_autoschedule[update.effective_chat.id] = {"step": "date_range", "kind": "video", "order": order}
     await update.message.reply_text(
         f"📅 Video autoschedule setup\n\n"
         f"Queue has {len(schedulable)} video post(s) — will be scheduled {order_label}.\n"
-        f"(Use /autoschedulevideo random to shuffle order, or /autoschedulevideo for oldest first.)\n\n"
+        f"(Use /autoschedulevideo oldest for oldest first, or /autoschedulevideo for random.)\n\n"
         f"Step 1/4: Date range?\n"
         f"Examples:  22 Jun - 30 Jun   or   2026-06-22 to 2026-06-30"
     )
@@ -2502,7 +2502,7 @@ async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("uploads",      "Browse uploads folder — post video or extract tweets"),
         BotCommand("autoschedule", "Distribute queue posts across a date range automatically"),
-        BotCommand("autoschedulevideo", "Distribute approved video posts — oldest first, or 'random' for shuffle"),
+        BotCommand("autoschedulevideo", "Distribute approved video posts randomly — 'oldest' for oldest first"),
         BotCommand("check",        "Trigger daily YouTube channel check"),
         BotCommand("process",      "Extract tweet ideas from a YouTube URL"),
         BotCommand("processall",   "Process all unprocessed channel videos"),
