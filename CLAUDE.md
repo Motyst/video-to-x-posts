@@ -16,6 +16,9 @@ twitter_poster.py  ← X/Twitter API posting via tweepy
 fetch_transcript.py ← standalone script: fetch transcript locally, no Claude
 ```
 
+Commands: full table in README.md; registered in `telegram_bot.py` via `set_my_commands()`.
+Env vars: `.env.example` for the list, `config.py` for defaults — those files are the source of truth.
+
 ## Database Schema
 
 Four tables in `david_bot.db`:
@@ -43,7 +46,7 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 
 ## Key Design Decisions
 
-**Feedback loop** — every approved post saved to `good_posts`, loaded as few-shot style examples in next Claude call. Quality improves as more posts approved.
+**Feedback loop** — every approved post saved to `good_posts`, loaded as few-shot style examples in next Claude call. Quality improves as more posts approved. `/addexample` inserts examples directly, no video needed.
 
 **Two-version system** — every generated idea comes as two versions:
 - Version A (Original): matches David's exact vocabulary, tone, rhythm from transcript
@@ -52,64 +55,19 @@ video_jobs  — video_id, job_type ('tweets'|'promo'|'retrospective'),
 - Tweets → single combined message with `[✅ Original] [✅ Trend] [❌ Reject both]`
 - Threads → two separate messages (full content visible), each with own approve button
 
-**Video promo content** — separate from tweet extraction. Generates title + hook + caption to post alongside a video (not ideas from it). Same transcript, different Claude prompt. Result stored as `format=promo`. Manual copy-paste workflow — bot does not upload video files to X.
+**Video promo content** — separate from tweet extraction: title + hook + caption to post *alongside* a video, not ideas from it. Same transcript, different prompt, stored as `format=promo`. Manual copy-paste workflow — bot does not upload video files to X.
 
-**Job tracking** — `video_jobs` table logs every content generation run per video (type, count, timestamp). `/status` shows recent videos with source icon, duration, and which jobs ran.
-
-**Transcript caching** — `get_transcript()` checks `TRANSCRIPTS_DIR` first. Running `/process` then `/promo` on the same video fetches transcript only once.
-
-**Transcript strategy** — tries YouTube auto-captions first (fast, free), falls back to Whisper (slower, better quality). Local files go straight to Whisper. All cached as `.txt` files.
+**Transcripts** — YouTube auto-captions first (fast, free), Whisper fallback (slower, better). Local files go straight to Whisper. All cached as `.txt` in `TRANSCRIPTS_DIR`; `get_transcript()` checks cache first, so `/process` then `/promo` on the same video fetches once.
 
 **Retrospective** — `retrospective.py` re-mines old transcripts monthly using current approved examples. Won't run until 5+ good posts exist.
 
-**Long-form articles** — `/article <url>` generates a full X article in David's voice (single version, no trend angle). Delivered as a `.txt` file attachment in Telegram. Length: Claude decides by default; set `ARTICLE_TARGET_WORDS` in `.env` to override. Output format abstracted via `format_article_for_output()` in `content_generator.py` — change `ARTICLE_OUTPUT_FORMAT` in `.env` to switch platforms.
+**Long-form articles** — `/article <url>` writes a full X article (single version, no trend angle), delivered as `.txt` attachment. Output format abstracted via `format_article_for_output()` — `ARTICLE_OUTPUT_FORMAT` env switches platforms.
 
-**Manual style examples** — `/addexample` lets you paste any post (from David or others) directly into `good_posts` as a few-shot example. No video needed.
-
-**Transcript-only batch fetch** — `/fetchtranscripts [N]` downloads transcripts for the next N channel videos without calling Claude. Skips videos with cached transcripts, so repeated calls auto-continue from where the last run stopped. Use `fetch_transcript.py` script for single-URL fetching from terminal.
-
-**VPS IP block workaround** — YouTube blocks most datacenter IPs. Solution: fetch transcripts locally (`fetch_transcript.py` or `/fetchtranscripts`), upload `.txt` files to VPS, then run `/process <url>` on VPS — finds cached transcript, skips YouTube entirely. Set `YOUTUBE_COOKIES_FILE` in `.env` for yt-dlp cookie auth as additional bypass.
-
-**Unschedule posts** — `/scheduled` shows each upcoming scheduled post with ❌ Unschedule button. Tapping reverts draft to `approved` status and moves it back to `/queue`.
-
-**X/Twitter auto-post** — `twitter_poster.py` posts via tweepy. Toggle at runtime with `/autopost on|off` — no restart needed. When enabled, approving a draft shows a scheduling keyboard (+1h/+2h/+4h/+8h/+24h/Custom/Now). Scheduled posts fired by a job running every 60 seconds.
-
-**Model switching** — `CLAUDE_MODEL` in `.env`. No code changes needed.
-
-**Whisper quality** — `WHISPER_MODEL=base` by default (fast). Change to `medium` or `large-v3` for better accuracy on accents or technical content.
+**Edit flow** — ✏️ button prompts for replacement text. Single tweet = plain text; thread = tweets separated by `---` on its own line.
 
 **Paths with spaces** — `/processlocal` and `/promolocal` auto-detect the file path by scanning argument prefixes against disk. No quotes needed.
 
 **Emoji in posts** — system prompt instructs Claude to start every tweet with one contextually relevant emoji.
-
-**Bot command menu** — registered via `set_my_commands()` on startup. Typing `/` in Telegram shows all commands with descriptions.
-
-## Telegram Commands
-
-| Command | Action |
-|---|---|
-| `/check` | Trigger daily YouTube channel check manually |
-| `/process <url>` | Extract tweet ideas from a YouTube URL |
-| `/processall` | Process entire unprocessed channel backlog |
-| `/processlocal <path> [title]` | Extract tweet ideas from a local file |
-| `/promo <url>` | Generate title + hook + caption for a YouTube video |
-| `/promolocal <path> [title]` | Generate promo content from a local file |
-| `/article <url>` | Write a long-form X article in David's voice (delivered as .txt file) |
-| `/fetchtranscripts [N]` | Download transcripts for next N channel videos — no Claude, no drafts |
-| `/addexample` | Paste any post as a style example for Claude |
-| `/queue` | Show all approved posts ready to copy-paste |
-| `/scheduled` | List upcoming scheduled posts with ❌ Unschedule button per post |
-| `/retrospective` | Re-analyse all archived transcripts |
-| `/autopost [on\|off]` | Toggle X auto-posting; no args shows current state |
-| `/status` | Stats + recent video job history |
-
-**Sending a file to the bot** — bot downloads it (≤20 MB Telegram limit), asks for title, Whisper transcribes, generates tweet drafts.
-
-**Inline buttons on each draft pair** — ✅ Original / ✅ Trend angle / ❌ Reject both.
-
-**Edit flow** — tap ✏️ on a single draft, bot prompts for new text. Single tweet = plain text. Thread = tweets separated by `---` on its own line.
-
-**Queue actions** — Post Now / Schedule / Mark as posted. Scheduling keyboard shown when X keys configured.
 
 ## State Dicts (in-memory, telegram_bot.py)
 
@@ -122,38 +80,8 @@ _pending_examples: dict[int, bool]           # chat_id → True when awaiting ex
 
 Lost on bot restart — in-flight edits/uploads drop silently. Acceptable given low volume.
 
-## Running
+## Deployment
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env   # fill in all values
-python telegram_bot.py
-```
-
-Daily check fires at `DAILY_CHECK_HOUR` UTC (default 9). Bot must stay running — host on a VPS or keep local machine on.
-
-## Environment Variables
-
-| Variable | Default | Notes |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | — | From @BotFather |
-| `TELEGRAM_CHAT_ID` | — | Your personal chat ID with the bot |
-| `ANTHROPIC_API_KEY` | — | |
-| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Change here to switch models |
-| `YOUTUBE_CHANNEL_URL` | — | Channel or playlist URL |
-| `DB_PATH` | `david_bot.db` | |
-| `TRANSCRIPTS_DIR` | `transcripts` | |
-| `DAILY_CHECK_HOUR` | `9` | UTC hour |
-| `WHISPER_DEVICE` | `cpu` | `cuda` if GPU available |
-| `WHISPER_COMPUTE` | `int8` | `float16` for GPU |
-| `WHISPER_MODEL` | `base` | `medium` or `large-v3` for better quality |
-| `AUTO_POST` | `false` | Default state for X auto-posting on startup |
-| `YOUTUBE_COOKIES_FILE` | `` | Path to cookies.txt for yt-dlp auth (needed on VPS to bypass IP blocks) |
-| `ARTICLE_TARGET_WORDS` | `` | Target word count for articles; empty = Claude decides |
-| `ARTICLE_OUTPUT_FORMAT` | `x_native` | Article output format; change to switch platforms |
-| `TWITTER_API_KEY` | — | X Developer Portal |
-| `TWITTER_API_SECRET` | — | X Developer Portal |
-| `TWITTER_ACCESS_TOKEN` | — | X Developer Portal |
-| `TWITTER_ACCESS_SECRET` | — | X Developer Portal |
+Production runs on a VPS. Host, service name, and the full deploy procedure live in `CLAUDE.local.md` (gitignored — contains the server address; never move that content into committed files).
 
 Read LEARNING.md at the start of every session and follow its instructions.
