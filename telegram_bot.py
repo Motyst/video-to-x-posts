@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -8,6 +9,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -64,6 +66,19 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+async def _send_retried(bot, **kwargs):
+    """send_message with one retry — a stale connection after a long blocking
+    call must not swallow a finished result."""
+    for attempt in (1, 2):
+        try:
+            return await bot.send_message(**kwargs)
+        except NetworkError as e:
+            if attempt == 2:
+                raise
+            logger.warning(f"send_message NetworkError, retrying: {e}")
+            await asyncio.sleep(2)
 
 # chat_id -> draft_id awaiting edited text
 _pending_edits: dict[int, int] = {}
@@ -143,11 +158,21 @@ def _parse_date_range(text: str) -> tuple[date, date] | None:
 
 
 def _parse_hour(text: str) -> int | None:
-    text = text.strip()
-    try:
-        return int(text.split(":")[0])
-    except (ValueError, IndexError):
+    text = text.strip().lower().replace(" ", "")
+    m = re.match(r"^(\d{1,2})(?::\d{2})?(am|pm)?$", text)
+    if not m:
         return None
+    h = int(m.group(1))
+    ampm = m.group(2)
+    if ampm:
+        if h < 1 or h > 12:
+            return None
+        h = h % 12
+        if ampm == "pm":
+            h += 12
+    elif h > 24:
+        return None
+    return h
 
 
 def _parse_hour_range(text: str) -> tuple[int, int] | None:
@@ -159,6 +184,11 @@ def _parse_hour_range(text: str) -> tuple[int, int] | None:
             if h1 is not None and h2 is not None:
                 return h1, h2
     return None
+
+
+def _hour_range_minutes(start_hour: int, end_hour: int) -> int:
+    """Minutes between start_hour and end_hour, wrapping past midnight if end <= start."""
+    return (end_hour - start_hour) * 60 if end_hour > start_hour else (24 - start_hour + end_hour) * 60
 
 
 def _parse_gap_minutes(text: str) -> int | None:
@@ -180,8 +210,11 @@ def _parse_gap_minutes(text: str) -> int | None:
 
 
 def _place_posts_random(n: int, base_date: date, start_hour: int, end_hour: int, min_gap_min: int) -> list[datetime]:
-    """Place n posts randomly in [start_hour, end_hour] on base_date with min_gap_min between each."""
-    range_min = (end_hour - start_hour) * 60
+    """Place n posts randomly in [start_hour, end_hour] on base_date with min_gap_min between each.
+
+    If end_hour <= start_hour, the window is treated as crossing midnight into the next day.
+    """
+    range_min = _hour_range_minutes(start_hour, end_hour)
     free_space = range_min - (n - 1) * min_gap_min
     points = sorted(random.uniform(0, free_space) for _ in range(n))
     offsets = [int(points[i] + i * min_gap_min) for i in range(n)]
@@ -757,7 +790,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(query.message.text + "\n\n⚠️ Could not extract hook.")
             return
         await query.edit_message_text(query.message.text + "\n\n🎣 Rewriting hook...")
-        variants = rewrite_hook(hook_text, video_title)
+        variants = await asyncio.to_thread(rewrite_hook, hook_text, video_title)
         if not variants:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
@@ -1191,21 +1224,22 @@ async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             f"✅ {n} posts per day\n\n"
             f"Step 3/4: Hour range (UTC)?\n"
-            f"Example:  9-18   or   09:00-21:00"
+            f"Example:  9-18   or   9PM-3PM   (crosses midnight into next day)"
         )
 
     elif step == "hour_range":
         result = _parse_hour_range(text)
         if not result:
-            await update.message.reply_text("Couldn't parse. Try: 9-18")
+            await update.message.reply_text("Couldn't parse. Try: 9-18 or 9PM-3PM")
             return
         sh, eh = result
-        if eh <= sh or sh < 0 or eh > 24:
-            await update.message.reply_text("Invalid range. Try: 9-18")
+        if sh == eh or sh < 0 or sh > 24 or eh < 0 or eh > 24:
+            await update.message.reply_text("Invalid range. Try: 9-18 or 9PM-3PM")
             return
+        overnight = eh <= sh
         state.update({"start_hour": sh, "end_hour": eh, "step": "min_gap"})
         await update.message.reply_text(
-            f"✅ {sh:02d}:00 – {eh:02d}:00 UTC\n\n"
+            f"✅ {sh:02d}:00 – {eh:02d}:00{' (+1 day) ' if overnight else ' '}UTC\n\n"
             f"Step 4/4: Minimum gap between posts?\n"
             f"Examples:  90   (minutes)   2h   1h30m"
         )
@@ -1217,7 +1251,7 @@ async def _handle_autoschedule_step(update: Update, context: ContextTypes.DEFAUL
             return
 
         n = state["posts_per_day"]
-        range_min = (state["end_hour"] - state["start_hour"]) * 60
+        range_min = _hour_range_minutes(state["start_hour"], state["end_hour"])
         required = (n - 1) * gap
 
         if required >= range_min:
@@ -1630,7 +1664,7 @@ async def cmd_fetchtranscripts(update: Update, context: ContextTypes.DEFAULT_TYP
     failed = 0
     for v in batch:
         try:
-            transcript = get_transcript(v["youtube_id"], v["title"])
+            transcript = await asyncio.to_thread(get_transcript, v["youtube_id"], v["title"])
             if transcript:
                 done += 1
                 logger.info(f"Transcript fetched: {v['youtube_id']} — {v['title']}")
@@ -1665,7 +1699,7 @@ async def cmd_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     comment_text = " ".join(context.args)
     await update.message.reply_text("✍️ Drafting reply options...")
 
-    options = generate_reply_options(comment_text)
+    options = await asyncio.to_thread(generate_reply_options, comment_text)
     if not options:
         await update.message.reply_text("⚠️ Could not generate replies. Try again.")
         return
@@ -1761,7 +1795,7 @@ async def cmd_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.args[0]
     await update.message.reply_text(f"🔍 Fetching video info\\.\\.\\.", parse_mode="MarkdownV2")
 
-    video = fetch_single_video(url)
+    video = await asyncio.to_thread(fetch_single_video, url)
     if not video:
         await update.message.reply_text("❌ Could not fetch video\\. Check the URL\\.", parse_mode="MarkdownV2")
         return
@@ -1791,7 +1825,7 @@ async def cmd_processall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("📋 Scanning channel for unprocessed videos\\.\\.\\.", parse_mode="MarkdownV2")
 
-    videos = get_unprocessed_videos(YOUTUBE_CHANNEL_URL)
+    videos = await asyncio.to_thread(get_unprocessed_videos, YOUTUBE_CHANNEL_URL)
     if not videos:
         await update.message.reply_text("✅ All channel videos already processed\\.", parse_mode="MarkdownV2")
         return
@@ -1914,7 +1948,7 @@ async def _generate_video_captions(bot, chat_id: int, file_path: str):
     video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
 
     if config.MAX_VIDEO_SECONDS:
-        duration = get_media_duration(file_path)
+        duration = await asyncio.to_thread(get_media_duration, file_path)
         if duration and duration > config.MAX_VIDEO_SECONDS:
             mins, secs = divmod(duration, 60)
             await bot.send_message(
@@ -1929,18 +1963,18 @@ async def _generate_video_captions(bot, chat_id: int, file_path: str):
 
     await bot.send_message(chat_id=chat_id, text=f"🎬 Transcribing: {title}\nThis may take a while...")
 
-    transcript, _ = transcribe_local_file(file_path, video_id)
+    transcript, _ = await asyncio.to_thread(transcribe_local_file, file_path, video_id)
     if not transcript:
         _pending_video_captions[chat_id] = file_path
-        await bot.send_message(chat_id=chat_id, text="⚠️ Transcription failed. Type caption manually:")
+        await _send_retried(bot, chat_id=chat_id, text="⚠️ Transcription failed. Type caption manually:")
         return
 
-    await bot.send_message(chat_id=chat_id, text="✍️ Generating captions...")
-    caps = generate_video_post_captions(video_id, title, transcript)
+    await _send_retried(bot, chat_id=chat_id, text="✍️ Generating captions...")
+    caps = await asyncio.to_thread(generate_video_post_captions, video_id, title, transcript)
 
     if not caps:
         _pending_video_captions[chat_id] = file_path
-        await bot.send_message(chat_id=chat_id, text="⚠️ Caption generation failed. Type caption manually:")
+        await _send_retried(bot, chat_id=chat_id, text="⚠️ Caption generation failed. Type caption manually:")
         return
 
     _video_caption_options[chat_id] = {
@@ -1966,7 +2000,7 @@ async def _generate_video_captions(bot, chat_id: int, file_path: str):
         f"4️⃣ HOOK (longer)\n{caps.get('hook', '')}\n\n"
         "Pick one, or type your own:"
     )
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    await _send_retried(bot, chat_id=chat_id, text=text, reply_markup=kb)
 
 
 async def cmd_schedulevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2002,7 +2036,7 @@ async def cmd_article(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.args[0]
     await update.message.reply_text("🔍 Fetching video info...")
 
-    video = fetch_single_video(url)
+    video = await asyncio.to_thread(fetch_single_video, url)
     if not video:
         await update.message.reply_text("❌ Could not fetch video. Check the URL.")
         return
@@ -2018,7 +2052,7 @@ async def _process_article_video(app: Application, video: dict):
     youtube_id = video["youtube_id"]
     title = video["title"]
 
-    transcript = get_transcript(youtube_id, title)
+    transcript = await asyncio.to_thread(get_transcript, youtube_id, title)
     transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
     video_db_id = upsert_video(
         youtube_id, title, video["url"], transcript_path,
@@ -2033,7 +2067,7 @@ async def _process_article_video(app: Application, video: dict):
         )
         return
 
-    article = generate_article(youtube_id, title, transcript)
+    article = await asyncio.to_thread(generate_article, youtube_id, title, transcript)
     if not article:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -2080,7 +2114,7 @@ async def cmd_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.args[0]
     await update.message.reply_text("🔍 Fetching video info\\.\\.\\.", parse_mode="MarkdownV2")
 
-    video = fetch_single_video(url)
+    video = await asyncio.to_thread(fetch_single_video, url)
     if not video:
         await update.message.reply_text("❌ Could not fetch video\\. Check the URL\\.", parse_mode="MarkdownV2")
         return
@@ -2240,7 +2274,7 @@ async def _process_video(app: Application, video: dict):
     youtube_id = video["youtube_id"]
     title = video["title"]
 
-    transcript = get_transcript(youtube_id, title)
+    transcript = await asyncio.to_thread(get_transcript, youtube_id, title)
     transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
 
     video_id = upsert_video(
@@ -2258,7 +2292,7 @@ async def _process_video(app: Application, video: dict):
         )
         return
 
-    ideas = generate_posts(youtube_id, title, transcript)
+    ideas = await asyncio.to_thread(generate_posts, youtube_id, title, transcript)
     if not ideas:
         logger.warning(f"No posts generated for {youtube_id}")
         return
@@ -2290,7 +2324,7 @@ async def _process_local_file(
     """Transcribe a local file with Whisper and generate drafts."""
     video_id = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
 
-    transcript, duration = transcribe_local_file(file_path, video_id)
+    transcript, duration = await asyncio.to_thread(transcribe_local_file, file_path, video_id)
 
     if delete_after:
         Path(file_path).unlink(missing_ok=True)
@@ -2310,7 +2344,7 @@ async def _process_local_file(
         duration_seconds=duration,
     )
 
-    ideas = generate_posts(video_id, title, transcript)
+    ideas = await asyncio.to_thread(generate_posts, video_id, title, transcript)
     if not ideas:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -2341,7 +2375,7 @@ async def _process_promo_video(app: Application, video: dict):
     youtube_id = video["youtube_id"]
     title = video["title"]
 
-    transcript = get_transcript(youtube_id, title)
+    transcript = await asyncio.to_thread(get_transcript, youtube_id, title)
     transcript_path = f"transcripts/{youtube_id}.txt" if transcript else None
     video_id = upsert_video(
         youtube_id, title, video["url"], transcript_path,
@@ -2357,7 +2391,7 @@ async def _process_promo_video(app: Application, video: dict):
         )
         return
 
-    promo = generate_promo(youtube_id, title, transcript)
+    promo = await asyncio.to_thread(generate_promo, youtube_id, title, transcript)
     if not promo:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -2376,7 +2410,7 @@ async def _process_promo_local_file(app: Application, file_path: str, title: str
     """Generate promo content from a local file."""
     video_id_str = "local_" + hashlib.md5(Path(file_path).name.encode()).hexdigest()[:10]
 
-    transcript, duration = transcribe_local_file(file_path, video_id_str)
+    transcript, duration = await asyncio.to_thread(transcribe_local_file, file_path, video_id_str)
     if not transcript:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -2392,7 +2426,7 @@ async def _process_promo_local_file(app: Application, file_path: str, title: str
         duration_seconds=duration,
     )
 
-    promo = generate_promo(video_id_str, title, transcript)
+    promo = await asyncio.to_thread(generate_promo, video_id_str, title, transcript)
     if not promo:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -2413,7 +2447,7 @@ async def _run_daily_check(app: Application) -> str:
     """Returns a summary string for the caller to report back."""
     logger.info("Daily check started")
     try:
-        new_videos = get_new_videos(YOUTUBE_CHANNEL_URL)
+        new_videos = await asyncio.to_thread(get_new_videos, YOUTUBE_CHANNEL_URL)
         if not new_videos:
             logger.info("No new videos found")
             return "No new videos found."
@@ -2448,6 +2482,16 @@ async def _track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text:
         cmd = update.message.text.split()[0].lstrip("/").split("@")[0].lower()
         log_command(cmd)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Global error handler — one WARN line for transient network blips,
+    full traceback for everything else."""
+    err = context.error
+    if isinstance(err, NetworkError):
+        logger.warning(f"Telegram NetworkError (transient, will retry): {err}")
+    else:
+        logger.error("Unhandled error in handler", exc_info=err)
 
 
 async def _post_init(app: Application):
@@ -2505,6 +2549,7 @@ def main():
         on_file_received,
     ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_edit_reply))
+    app.add_error_handler(on_error)
 
     app.job_queue.run_daily(
         daily_job,
