@@ -33,6 +33,11 @@ TWITTER_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TWITTER_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_SECRET", "")
 AUTO_POST = os.getenv("AUTO_POST", "false").lower() == "true"
 
+# VPS deploy target for fetch_transcript.py's scp hint (e.g. user@host).
+# Empty = hint omitted. Kept out of the repo — set it in .env.
+VPS_HOST = os.getenv("VPS_HOST", "")
+VPS_BOT_DIR = os.getenv("VPS_BOT_DIR", "/root/david_post_bot")
+
 # X video upload cap in seconds — 120 for accounts without X Premium.
 # Set to 0 to disable the check (e.g. once the account has Premium).
 MAX_VIDEO_SECONDS = int(os.getenv("MAX_VIDEO_SECONDS", "120"))

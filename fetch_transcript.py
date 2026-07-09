@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from youtube_monitor import fetch_single_video
 from transcript import get_transcript
+from config import VPS_HOST, VPS_BOT_DIR
 
 def main():
     if len(sys.argv) < 2:
@@ -37,8 +38,11 @@ def main():
     txt_path = Path("transcripts") / f"{vid_id}.txt"
     print(f"Done. Transcript saved: {txt_path} ({len(transcript)} chars)")
     print()
-    print(f"Now upload to VPS:")
-    print(f'  scp "{txt_path.resolve()}" root@5.78.218.169:/root/david_post_bot/transcripts/')
+    if VPS_HOST:
+        print(f"Now upload to VPS:")
+        print(f'  scp "{txt_path.resolve()}" {VPS_HOST}:{VPS_BOT_DIR}/transcripts/')
+    else:
+        print("Set VPS_HOST in .env to get the scp upload command here.")
     print(f"Then in Telegram: /process {url}")
 
 if __name__ == "__main__":
