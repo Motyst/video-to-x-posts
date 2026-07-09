@@ -189,7 +189,7 @@ def generate_article(youtube_id: str, title: str, transcript: str) -> dict | Non
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=8000,
+            max_tokens=16000,
             system=ARTICLE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -210,7 +210,7 @@ def generate_article(youtube_id: str, title: str, transcript: str) -> dict | Non
             for k, v in article.items()
         }
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid article response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid article response for {youtube_id}: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return None
 
 
@@ -270,7 +270,7 @@ def generate_video_post_captions(video_id: str, title: str, transcript: str) -> 
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=2000,
+            max_tokens=16000,
             system=VIDEO_CAPTION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -290,7 +290,7 @@ def generate_video_post_captions(video_id: str, title: str, transcript: str) -> 
             for k, v in result.items()
         }
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid caption response for {video_id}: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid caption response for {video_id}: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return None
 
 
@@ -308,7 +308,7 @@ def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2000,
+        max_tokens=16000,
         system=PROMO_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -325,7 +325,7 @@ def generate_promo(youtube_id: str, title: str, transcript: str) -> dict | None:
             for k, v in promo.items()
         }
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid promo response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid promo response for {youtube_id}: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return None
 
 
@@ -343,7 +343,7 @@ def generate_posts(youtube_id: str, title: str, transcript: str) -> list:
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=6000,
+        max_tokens=16000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -357,7 +357,7 @@ def generate_posts(youtube_id: str, title: str, transcript: str) -> list:
             raise ValueError("Expected a JSON array")
         return [_clean_idea(idea) for idea in ideas]
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid Claude response for {youtube_id}: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid Claude response for {youtube_id}: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return []
 
 
@@ -419,7 +419,7 @@ def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=600,
+            max_tokens=8000,
             system=HOOK_REWRITE_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -436,7 +436,7 @@ def rewrite_hook(hook_text: str, video_title: str) -> list[str] | None:
             raise ValueError("Expected array of 3")
         return [v.replace("—", ",").replace(" ,", ",") for v in variants[:3]]
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid hook rewrite response: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid hook rewrite response: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return None
 
 
@@ -479,7 +479,7 @@ def generate_reply_options(comment_text: str) -> list[str] | None:
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=500,
+            max_tokens=8000,
             system=REPLY_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -496,7 +496,7 @@ def generate_reply_options(comment_text: str) -> list[str] | None:
             raise ValueError("Expected array of 3")
         return [r.replace("—", ",").replace(" ,", ",") for r in replies[:3]]
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Invalid reply response: {e}\nRaw: {raw[:300]}")
+        logger.error(f"Invalid reply response: {e} (stop_reason={response.stop_reason})\nRaw: {raw[:300]}")
         return None
 
 
